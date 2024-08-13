@@ -6,6 +6,7 @@
 
 pub mod grpc_relay;
 pub mod in_memory;
+pub mod libp2p_impl;
 
 use std::future::Future;
 
