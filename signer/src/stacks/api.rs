@@ -233,7 +233,7 @@ pub struct ContractVar {
     /// The data of the contract variable.
     pub data: Vec<u8>,
     /// The proof of the contract variable.
-    pub proof: Option<Vec<u8>>
+    pub proof: Option<Vec<u8>>,
 }
 
 /// Helper function for converting a hexidecimal string into an integer.
@@ -279,7 +279,7 @@ impl StacksClient {
     }
 
     /// Get the data of a contract variable.
-    /// 
+    ///
     /// This is done by making a GET /v2/data_var/<principal>/<contract-name>/<variable-name> request.
     /// In the request we specify that the proof should not be included in the response.
     #[tracing::instrument(skip_all)]
@@ -289,7 +289,10 @@ impl StacksClient {
         contract_name: &str,
         variable_name: &str,
     ) -> Result<ContractVar, Error> {
-        let path = format!("/v2/data_var/{}/{}/{}?proof=0", address, contract_name, variable_name);
+        let path = format!(
+            "/v2/data_var/{}/{}/{}?proof=0",
+            address, contract_name, variable_name
+        );
         let base = self.node_endpoint.clone();
         let url = base
             .join(&path)
@@ -996,7 +999,8 @@ mod tests {
         let contract_name = "sbtc-registry";
         let variable_name = "current-signer-set";
 
-        let var = client.get_data_var(&CONTRACT_PRINCIPAL, contract_name, variable_name)
+        let var = client
+            .get_data_var(&CONTRACT_PRINCIPAL, contract_name, variable_name)
             .await
             .expect("failed to fetch contract variable data");
 
