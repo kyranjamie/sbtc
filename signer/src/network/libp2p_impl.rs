@@ -1,12 +1,22 @@
 //! Signer network peer implementation using libp2p
 
 use std::{
-    cell::LazyCell, collections::{hash_map::DefaultHasher, VecDeque}, error::Error, hash::{Hash, Hasher}, sync::Arc, time::Duration
+    cell::LazyCell, 
+    collections::{hash_map::DefaultHasher, VecDeque}, 
+    error::Error, 
+    hash::{Hash, Hasher}, 
+    sync::Arc, 
+    time::Duration
 };
 
-use futures::{stream::Next, FutureExt, StreamExt};
+use futures::{FutureExt, StreamExt};
 use libp2p::{
-    core::transport::ListenerId, gossipsub::{self, IdentTopic, PublishError}, identity::Keypair, kad::{self, store::MemoryStore}, mdns, noise, ping, swarm::{NetworkBehaviour, SwarmEvent}, tcp, yamux, Multiaddr, Swarm, SwarmBuilder, TransportError
+    gossipsub::{self, IdentTopic, PublishError}, 
+    identity::Keypair, 
+    kad::{self, store::MemoryStore}, 
+    mdns, noise, ping, 
+    swarm::{NetworkBehaviour, SwarmEvent}, 
+    tcp, yamux, Multiaddr, Swarm, SwarmBuilder, TransportError
 };
 use tokio::{sync::Mutex, task::JoinHandle};
 
@@ -44,91 +54,60 @@ pub enum SignerSwarmError {
 
 /// A libp2p network implementation for the signer
 pub struct SignerSwarm {
+    swarm: Swarm<SignerBehavior>,
+    listen_addrs: Vec<Multiaddr>,
+    peer_addrs: Vec<Multiaddr>,
+}
+
+/// A handle to the libp2p network
+pub struct SignerSwarmHandle {
     swarm: Arc<Mutex<Swarm<SignerBehavior>>>,
-    listener_id: Option<ListenerId>,
-    run_handle: Mutex<Option<JoinHandle<Result<(), SignerSwarmError>>>>,
-    addrs: Mutex<Vec<Multiaddr>>,
     incoming_messages: Arc<Mutex<VecDeque<Msg>>>,
+    run_handle: Option<JoinHandle<Result<(), SignerSwarmError>>>,
 }
 
-#[derive(NetworkBehaviour)]
-struct SignerBehavior {
-    /// GossipSub 
-    gossipsub: gossipsub::Behaviour,
-    mdns: mdns::tokio::Behaviour,
-    kademlia: kad::Behaviour<MemoryStore>,
-    ping: ping::Behaviour
-}
-
-impl SignerSwarm {
-    /// Create a new libp2p network
-    pub fn new(keypair: Keypair) -> Result<Self, Box<dyn Error>> {
-        let mut swarm = SwarmBuilder::with_existing_identity(keypair)
-            .with_tokio()
-            .with_tcp(
-                tcp::Config::default(),
-                noise::Config::new,
-                yamux::Config::default
-            )?
-            .with_quic()
-            .with_behaviour(|key| {
-                let message_id_fn = |message: &gossipsub::Message| {
-                    let mut hasher = DefaultHasher::new();
-                    message.data.hash(&mut hasher);
-                    gossipsub::MessageId::from(hasher.finish().to_string())
-                };
-
-                let gossipsub_config = gossipsub::ConfigBuilder::default()
-                    .heartbeat_interval(Duration::from_secs(10))
-                    .validation_mode(gossipsub::ValidationMode::Strict)
-                    .message_id_fn(message_id_fn)
-                    .build()?;
-
-                Ok(SignerBehavior {
-                    gossipsub: gossipsub::Behaviour::new(
-                        gossipsub::MessageAuthenticity::Signed(key.clone()),
-                        gossipsub_config
-                    )?,
-                    mdns: mdns::tokio::Behaviour::new(
-                        mdns::Config::default(),
-                        key.public().to_peer_id()
-                    )?,
-                    kademlia: kad::Behaviour::new(
-                        key.public().to_peer_id(),
-                        MemoryStore::new(key.public().to_peer_id()),
-                    ),
-                    ping: ping::Behaviour::default()
-                })
-            })?
-            .with_swarm_config(|c| 
-                c.with_idle_connection_timeout(Duration::from_secs(60))
-            )
-            .build();
-
-        swarm.behaviour_mut().gossipsub.subscribe(&TOPIC)?;
-
-        Ok(SignerSwarm {
-            swarm: Arc::new(Mutex::new(swarm)),
-            listener_id: None,
-            run_handle: Mutex::new(None),
-            addrs: Mutex::new(Vec::new()),
-            incoming_messages: Arc::new(Mutex::new(VecDeque::new()))
-        })
+impl SignerSwarmHandle {
+    /// Stop the signer swarm
+    pub async fn stop(&mut self) {
+        if let Some(handle) = &self.run_handle {
+            handle.abort();
+            self.run_handle = None;
+        }
     }
 
-    /// Start the libp2p swarm
-    pub async fn run(&self) -> Result<(), SignerSwarmError> {
-        let local_peer_id = self.swarm.lock().await.local_peer_id().to_string();
-        tracing::info!(%local_peer_id, "Starting libp2p swarm");
+    /// Get the addresses the libp2p swarm is listening on
+    pub async fn get_listen_addrs(&self) -> Vec<String> {
+        self.swarm.lock().await.listeners().map(|addr| addr.to_string()).collect()
+    }
 
+    /// Get the number of connected peers
+    pub async fn get_connected_peer_count(&self) -> usize {
+        self.swarm.lock().await.connected_peers().count()
+    }
+
+    /// Connect to a peer at the specified multiaddress
+    pub async fn dial(&self, peer: Multiaddr) -> Result<(), SignerSwarmError> {
+        tracing::info!(%peer, "Dialing peer");
+        self.swarm.lock().await.dial(peer)?;
+        Ok(())
+    }
+
+    /// Receive the next message from the libp2p network
+    async fn receive_next(&self) -> Result<Msg, SignerSwarmError> {
+        loop {
+            if let Some(msg) = self.incoming_messages.lock().await.pop_front() {
+                return Ok(msg);
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Start the signer swarm
+    pub async fn start(&mut self) -> Result<(), SignerSwarmError> {
+        let local_peer_id = self.swarm.lock().await.local_peer_id().to_string();
         let swarm = Arc::clone(&self.swarm);
         let incoming_messages = Arc::clone(&self.incoming_messages);
 
-        for addr in self.addrs.lock().await.iter() {
-            tracing::info!(%local_peer_id, %addr, "Beginning to listen on address");
-            swarm.lock().await.listen_on(addr.clone())
-                .expect(&format!("Failed to listen on address '{addr:?}'"));
-        }
 
         let run_handle = tokio::spawn(async move {
             let swarm = Arc::clone(&swarm);
@@ -188,58 +167,111 @@ impl SignerSwarm {
             }
         });
 
-        {
-            let mut run_handle_lock = self.run_handle.lock().await; 
-            *run_handle_lock = Some(run_handle);
-        }
-        
+        self.run_handle = Some(run_handle);
         Ok(())
-    }
-
-    /// Add the specified listener address to the libp2p swarm
-    pub async fn add_endpoint(&self, endpoint: Multiaddr) {
-        self.addrs.lock().await.push(endpoint);
-    }
-
-    /// Get the listener ID of the libp2p swarm
-    pub fn get_listener_id(&self) -> Option<String> {
-        self.listener_id.map(|id| id.to_string())
-    }
-
-    /// Get the local peer ID of the libp2p swarm
-    pub async fn get_local_peer_id(&self) -> String {
-        self.swarm.lock().await.local_peer_id().to_string()
-    }
-
-    /// Get the addresses the libp2p swarm is listening on
-    pub async fn get_listen_addresses(&self) -> Vec<String> {
-        self.swarm.lock().await.listeners().map(|addr| addr.to_string()).collect()
-    }
-
-    /// Get the number of connected peers
-    pub async fn get_peer_count(&self) -> usize {
-        self.swarm.lock().await.connected_peers().count()
-    }
-
-    /// Connect to a peer at the specified multiaddress
-    pub async fn dial(&self, peer: Multiaddr) -> Result<(), SignerSwarmError> {
-        tracing::info!(%peer, "Dialing peer");
-        self.swarm.lock().await.dial(peer)?;
-        Ok(())
-    }
-
-    /// Receive the next message from the libp2p network
-    async fn receive_next(&self) -> Result<Msg, SignerSwarmError> {
-        loop {
-            if let Some(msg) = self.incoming_messages.lock().await.pop_front() {
-                return Ok(msg);
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
     }
 }
 
-impl super::MessageTransfer for SignerSwarm {
+#[derive(NetworkBehaviour)]
+struct SignerBehavior {
+    gossipsub: gossipsub::Behaviour,
+    mdns: mdns::tokio::Behaviour,
+    kademlia: kad::Behaviour<MemoryStore>,
+    ping: ping::Behaviour
+}
+
+impl SignerSwarm {
+    /// Configure a new signer swarm with the specified keypair.
+    pub fn new(keypair: Keypair) -> Result<Self, Box<dyn Error>> {
+        let mut swarm = SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default(),
+                noise::Config::new,
+                yamux::Config::default
+            )?
+            .with_quic()
+            .with_behaviour(|key| {
+                let message_id_fn = |message: &gossipsub::Message| {
+                    let mut hasher = DefaultHasher::new();
+                    message.data.hash(&mut hasher);
+                    gossipsub::MessageId::from(hasher.finish().to_string())
+                };
+
+                let gossipsub_config = gossipsub::ConfigBuilder::default()
+                    .heartbeat_interval(Duration::from_secs(10))
+                    .validation_mode(gossipsub::ValidationMode::Strict)
+                    .message_id_fn(message_id_fn)
+                    .build()?;
+
+                Ok(SignerBehavior {
+                    gossipsub: gossipsub::Behaviour::new(
+                        gossipsub::MessageAuthenticity::Signed(key.clone()),
+                        gossipsub_config
+                    )?,
+                    mdns: mdns::tokio::Behaviour::new(
+                        mdns::Config::default(),
+                        key.public().to_peer_id()
+                    )?,
+                    kademlia: kad::Behaviour::new(
+                        key.public().to_peer_id(),
+                        MemoryStore::new(key.public().to_peer_id()),
+                    ),
+                    ping: ping::Behaviour::default()
+                })
+            })?
+            .with_swarm_config(|c| 
+                c.with_idle_connection_timeout(Duration::from_secs(60))
+            )
+            .build();
+
+        swarm.behaviour_mut().gossipsub.subscribe(&TOPIC)?;
+
+        Ok(SignerSwarm {
+            swarm,
+            listen_addrs: Vec::new(),
+            peer_addrs: Vec::new()
+        })
+    }
+
+    /// Start the signer swarm, consuming this instance and returning a
+    /// [`SignerSwarmHandle`] that can be used to interact with the swarm.
+    pub async fn run(mut self) -> Result<SignerSwarmHandle, SignerSwarmError> {
+        let local_peer_id = self.swarm.local_peer_id().to_string();
+        tracing::info!(%local_peer_id, "Starting libp2p swarm");
+
+        for addr in self.listen_addrs.iter() {
+            tracing::info!(%local_peer_id, %addr, "Beginning to listen on address");
+            self.swarm.listen_on(addr.clone())
+                .expect(&format!("Failed to listen on address '{addr:?}'"));
+        }
+
+        let mut handle = SignerSwarmHandle {
+            swarm: Arc::new(Mutex::new(self.swarm)),
+            incoming_messages: Arc::new(Mutex::new(VecDeque::new())),
+            run_handle: None
+        };
+        
+        handle.start().await?;
+        
+        Ok(handle)
+    }
+
+    /// Add the specified listener address to the libp2p swarm
+    pub fn add_listen_endpoint(&mut self, endpoint: Multiaddr) {
+        self.listen_addrs.push(endpoint);
+    }
+
+    /// Get the local peer ID of the libp2p swarm
+    pub fn get_local_peer_id(&self) -> String {
+        self.swarm.local_peer_id().to_string()
+    }
+}
+
+/// Implementation of [`MessageTransfer`] for [`SignerSwarmHandle`], which
+/// provides the ability for generic signer code to publish to and receive
+/// messages from the libp2p network.
+impl super::MessageTransfer for SignerSwarmHandle {
     type Error = SignerSwarmError;
 
     #[tracing::instrument(skip(self))]
@@ -280,14 +312,20 @@ mod tests {
         let network_1_tcp_addr = "/ip4/0.0.0.0/tcp/0";
         let network_2_tcp_addr = "/ip4/0.0.0.0/tcp/0";
 
-        let network_1_handle = tokio::spawn(async move {
-            network_1.add_endpoint(
-                network_1_tcp_addr
-                    .parse()
-                    .expect("failed to parse network 1 multiaddr")
-                ).await;
+        network_1.add_listen_endpoint(
+            network_1_tcp_addr
+                .parse()
+                .expect("failed to parse network 1 multiaddr")
+            );
 
-            network_1.run().await.expect("network 1 failed to run");
+        network_2.add_listen_endpoint(
+            network_2_tcp_addr
+                .parse()
+                .expect("failed to parse network 2 multiaddr ")
+            );
+
+        let network_1_handle = tokio::spawn(async move {
+            let mut network_1 = network_1.run().await.expect("network 1 failed to run");
 
             loop {
                 network_1.receive().await.expect("network 1 failed to receive message");
@@ -295,15 +333,9 @@ mod tests {
         });
 
         let network_2_handle = tokio::spawn(async move {
-            network_2.add_endpoint(
-                network_2_tcp_addr
-                    .parse()
-                    .expect("failed to parse network 2 multiaddr ")
-                ).await;
+            let mut network_2 = network_2.run().await.expect("network 2 failed to run");
 
-            network_2.run().await.expect("network 2 failed to run");
-
-            while network_2.get_peer_count().await == 0 {}
+            while network_2.get_connected_peer_count().await == 0 {}
 
             tracing::info!("Network 2 is connected to a peer");
             tokio::time::sleep(Duration::from_secs(1)).await;
