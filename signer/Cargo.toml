@@ -50,7 +50,7 @@ tracing-subscriber.workspace = true
 url.workspace = true
 wsts.workspace = true
 zeromq.workspace = true
-libp2p = { version = "0.54.0", features = ["macros", "noise", "ping", "tcp", "tokio", "yamux", "mdns", "quic", "gossipsub"] }
+libp2p = { version = "0.54.0", features = ["macros", "kad", "noise", "ping", "tcp", "tokio", "yamux", "mdns", "quic", "gossipsub"] }
 
 # Only for testing
 fake = { version = "2.9.2", features = ["derive", "time"], optional = true }

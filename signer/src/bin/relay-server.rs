@@ -1,7 +1,6 @@
 use clap::Parser;
 
-use libp2p::identity::Keypair;
-use signer::network::{grpc_relay, libp2p_impl::LibP2PNetwork};
+use signer::network::grpc_relay;
 
 /// Relay server for sBTC v1.
 ///
@@ -33,8 +32,6 @@ async fn main() {
     let args = Args::parse();
 
     sbtc::logging::setup_logging("info,signer=debug,relay-server=debug", args.pretty_logs);
-
-    let libp2p_server = LibP2PNetwork::new(Keypair::generate_ed25519()).expect("failed to create libp2p server");
 
     let server = grpc_relay::RelayServer::new();
     server.serve(args.address()).await.expect("server failed");

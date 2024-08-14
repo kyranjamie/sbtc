@@ -227,6 +227,15 @@ pub struct AccountInfo {
     pub nonce: u64,
 }
 
+/// A contract variable with its data and optional proof.
+#[derive(Debug, serde::Deserialize)]
+pub struct ContractVar {
+    /// The data of the contract variable.
+    pub data: Vec<u8>,
+    /// The proof of the contract variable.
+    pub proof: Option<Vec<u8>>
+}
+
 /// Helper function for converting a hexidecimal string into an integer.
 fn parse_hex_u128(hex: &str) -> Result<u128, Error> {
     let hex_str = hex.trim_start_matches("0x");
@@ -267,6 +276,41 @@ impl StacksClient {
             nakamoto_start_height: settings.node.nakamoto_start_height,
             client: reqwest::Client::new(),
         }
+    }
+
+    /// Get the data of a contract variable.
+    /// 
+    /// This is done by making a GET /v2/data_var/<principal>/<contract-name>/<variable-name> request.
+    /// In the request we specify that the proof should not be included in the response.
+    #[tracing::instrument(skip_all)]
+    pub async fn get_data_var(
+        &self,
+        address: &StacksAddress,
+        contract_name: &str,
+        variable_name: &str,
+    ) -> Result<ContractVar, Error> {
+        let path = format!("/v2/data_var/{}/{}/{}?proof=0", address, contract_name, variable_name);
+        let base = self.node_endpoint.clone();
+        let url = base
+            .join(&path)
+            .map_err(|err| Error::PathJoin(err, base, Cow::Owned(path)))?;
+
+        tracing::debug!(%address, %contract_name, %variable_name, "Fetching contract variable data");
+
+        let response = self
+            .client
+            .get(url)
+            .timeout(REQUEST_TIMEOUT)
+            .send()
+            .await
+            .map_err(Error::StacksNodeRequest)?;
+
+        response
+            .error_for_status()
+            .map_err(Error::StacksNodeResponse)?
+            .json::<ContractVar>()
+            .await
+            .map_err(Error::UnexpectedStacksResponse)
     }
 
     /// Get the latest account info for the given address.
@@ -650,10 +694,17 @@ mod tests {
     use crate::storage::postgres::PgStore;
     use crate::storage::DbWrite;
 
+    use blockstack_lib::types::Address;
     use test_case::test_case;
 
     use super::*;
+    use std::cell::LazyCell;
     use std::io::Read;
+
+    const CONTRACT_PRINCIPAL: LazyCell<StacksAddress> = LazyCell::new(|| {
+        StacksAddress::from_string("ST1PQHQKV0RJXZFY1DGX8MNSNYVE3VGZJSRTPGZGM")
+            .expect("failed to parse stacks contract principal address")
+    });
 
     #[ignore = "This is an integration test that hasn't been setup for CI yet"]
     #[sqlx::test]
@@ -934,5 +985,22 @@ mod tests {
         let address = StacksAddress::burn_address(false);
         let account = client.get_account(&address).await.unwrap();
         assert_eq!(account.nonce, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "This is an integration test that hasn't been setup for CI yet"]
+    async fn fetching_contract_data_var_works() {
+        let settings = StacksSettings::new_from_config().unwrap();
+        let client = StacksClient::new(settings);
+
+        let contract_name = "sbtc-registry";
+        let variable_name = "current-signer-set";
+
+        let var = client.get_data_var(&CONTRACT_PRINCIPAL, contract_name, variable_name)
+            .await
+            .expect("failed to fetch contract variable data");
+
+        assert!(!var.data.is_empty());
+        assert!(var.proof.is_none());
     }
 }
