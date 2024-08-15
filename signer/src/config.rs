@@ -3,9 +3,16 @@
 use config::{Config, ConfigError, Environment, File};
 use serde::Deserialize;
 use serde::Deserializer;
+use std::net::IpAddr;
 use std::sync::LazyLock;
+use url::Url;
 
 use crate::error::Error;
+
+/// The default signer network listen-on address.
+pub const DEFAULT_NETWORK_HOST: &str = "0.0.0.0";
+/// The default signer network listen-on port.
+pub const DEFAULT_NETWORK_PORT: u16 = 4122;
 
 #[derive(serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -24,6 +31,20 @@ pub struct Settings {
     pub blocklist_client: BlocklistClientConfig,
     /// Electrum notifier specific config
     pub block_notifier: BlockNotifierConfig,
+    /// Network configuration
+    pub network: NetworkConfig,
+}
+
+/// Signer network configuration
+#[derive(Deserialize, Clone, Debug)]
+pub struct NetworkConfig {
+    /// List of seeds for the P2P network. If empty then the signer will
+    /// only use peers discovered via the `sbtc-discovery` smart contract.
+    pub seeds: Vec<String>,
+    /// The local network interface(s) to listen on. If empty, then
+    /// the signer will use [`DEFAULT_NETWORK_HOST`]:[`DEFAULT_NETWORK_PORT] as
+    /// the default and listen on both TCP and QUIC protocols.
+    pub listen_on: Vec<String>,
 }
 
 /// Blocklist client specific config
@@ -73,20 +94,71 @@ impl Settings {
         Ok(settings)
     }
 
+    /// Perform validation on the configuration.
     fn validate(&self) -> Result<(), ConfigError> {
         if self.blocklist_client.host.is_empty() {
-            return Err(ConfigError::Message("Host cannot be empty".to_string()));
+            return Err(ConfigError::Message(
+                "[blocklist_client] Host cannot be empty".to_string(),
+            ));
         }
         if !(1..=65535).contains(&self.blocklist_client.port) {
             return Err(ConfigError::Message(
-                "Port must be between 1 and 65535".to_string(),
+                "[blocklist_client] Port must be between 1 and 65535".to_string(),
             ));
         }
         if self.block_notifier.server.is_empty() {
             return Err(ConfigError::Message(
-                "Electrum server cannot be empty".to_string(),
+                "[block_notifier] Electrum server cannot be empty".to_string(),
             ));
         }
+
+        // Validate [network.listen_on]
+        for addr in &self.network.listen_on {
+            self.validate_network_peering_addr("network.listen_on", addr)?;
+        }
+
+        // Validate [network.seeds]
+        for addr in &self.network.seeds {
+            self.validate_network_peering_addr("network.seeds", addr)?;
+        }
+
+        Ok(())
+    }
+
+    /// Validate a network address used by the peering protocol.
+    fn validate_network_peering_addr(&self, section: &str, addr: &str) -> Result<(), ConfigError> {
+        if addr.is_empty() {
+            return Err(ConfigError::Message(format!(
+                "[{section}] Address cannot be empty",
+            )));
+        }
+
+        let url = Url::parse(addr).map_err(|e| {
+            ConfigError::Message(format!("[{section}] Error parsing '{addr}': {e}"))
+        })?;
+
+        // Host must be present
+        if url.host().is_none() {
+            return Err(ConfigError::Message(format!(
+                "[{section}] Host cannot be empty: '{addr}'"
+            )));
+        }
+
+        // We only support TCP and QUIC schemes
+        if !["tcp", "quic-v1"].contains(&url.scheme()) {
+            return Err(ConfigError::Message(format!(
+                "[{section}] Only `tcp` and `quic-v1` schemes are supported"
+            )));
+        }
+
+        // We don't support URL paths
+        if url.path() != "/" {
+            return Err(ConfigError::Message(format!(
+                "[{section}] Paths are not supported: '{}'",
+                url.path()
+            )));
+        }
+
         Ok(())
     }
 }
