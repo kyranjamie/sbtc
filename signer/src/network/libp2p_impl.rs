@@ -10,7 +10,6 @@ use std::{
     time::Duration,
 };
 
-use bitcoin::key;
 use futures::{FutureExt, StreamExt};
 use libp2p::{
     gossipsub::{self, IdentTopic, PublishError},
@@ -26,12 +25,14 @@ use url::Url;
 
 use crate::{
     codec::{Decode, Encode},
-    config::DEFAULT_NETWORK_PORT,
+    config::DEFAULT_P2P_PORT,
 };
 
 use super::Msg;
 
+/// The topic used for signer gossipsub messages
 const TOPIC: LazyCell<IdentTopic> = LazyCell::new(|| IdentTopic::new("sbtc-signer"));
+/// The current version of this package as reported by Cargo.
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Errors that can occur when using the libp2p network
@@ -130,7 +131,7 @@ impl SignerSwarmBuilder {
         let port = if let Some(p) = url.port() {
             p
         } else {
-            DEFAULT_NETWORK_PORT
+            DEFAULT_P2P_PORT
         };
 
         let mut multiaddrs: Vec<Multiaddr> = Vec::new();
@@ -598,7 +599,10 @@ mod tests {
 
         let local_addrs = nix::ifaddrs::getifaddrs().unwrap();
         let local_addrs = local_addrs
-            .filter(|addr| addr.flags.contains(InterfaceFlags::IFF_UP | InterfaceFlags::IFF_LOOPBACK))
+            .filter(|addr| {
+                addr.flags
+                    .contains(InterfaceFlags::IFF_UP | InterfaceFlags::IFF_LOOPBACK)
+            })
             .filter(|addr| addr.address.is_some())
             .map(|addr| addr.address.unwrap().to_string())
             .collect::<Vec<String>>();
@@ -621,23 +625,32 @@ mod tests {
             .try_init();
 
         tracing::info!("Resolving google.com");
-        let resolved_addrs = ("google.com", 4122).to_socket_addrs().unwrap().collect::<Vec<_>>();
+        let resolved_addrs = ("google.com", 4122)
+            .to_socket_addrs()
+            .unwrap()
+            .collect::<Vec<_>>();
         for addr in resolved_addrs.iter() {
             tracing::info!(%addr, "Resolved address");
         }
 
-        let multiaddrs = SignerSwarmBuilder::url_to_multiaddrs(&Url::parse("tcp://google.com:4122").unwrap())
-            .unwrap();
+        let multiaddrs =
+            SignerSwarmBuilder::url_to_multiaddrs(&Url::parse("tcp://google.com:4122").unwrap())
+                .unwrap();
 
         for addr in multiaddrs.iter() {
             tracing::info!(%addr, "Multiaddr");
         }
 
         for addr in resolved_addrs.iter() {
-            assert!(multiaddrs.contains(&format!("/{}/{}/tcp/{}",
-                if addr.is_ipv4() { "ip4" } else { "ip6" }, 
-                addr.ip(), 
-                addr.port()).parse().unwrap()
+            assert!(multiaddrs.contains(
+                &format!(
+                    "/{}/{}/tcp/{}",
+                    if addr.is_ipv4() { "ip4" } else { "ip6" },
+                    addr.ip(),
+                    addr.port()
+                )
+                .parse()
+                .unwrap()
             ));
         }
     }
