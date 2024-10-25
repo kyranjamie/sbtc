@@ -411,7 +411,8 @@ impl PgStore {
     /// returns the least height out of all bitcoin blocks for which the
     /// deposit has been confirmed.
     ///
-    /// None is returned if we do not have a record of the deposit request.
+    /// None is returned if we do not have a record of the deposit request,
+    /// or we somehow do not have a record for the deposit transaction.
     pub async fn get_deposit_request_least_height(
         &self,
         txid: &model::BitcoinTxId,
@@ -433,7 +434,7 @@ impl PgStore {
             "#,
         )
         .bind(txid)
-        .bind(i64::from(output_index))
+        .bind(i32::try_from(output_index).map_err(Error::ConversionDatabaseInt)?)
         .fetch_optional(&self.0)
         .await
         .map_err(Error::SqlxQuery)
@@ -770,6 +771,14 @@ impl super::DbRead for PgStore {
                 is_accepted: None,
             });
         };
+
+        #[derive(Debug, sqlx::FromRow)]
+        struct StatusSummary {
+            is_accepted: Option<bool>,
+            can_sign: Option<bool>,
+            is_confirmed: bool,
+        }
+
         // In this query we list out the blockchain as far back as is
         // necessary; if the deposit request is on the blockchain
         // identified by the given chain tip, it will be in one of the
@@ -780,9 +789,12 @@ impl super::DbRead for PgStore {
         // Note that because of the above query and early exit, we know
         // that we have a record of the deposit request, so this query will
         // return exactly one row.
-        let (is_accepted, can_sign, is_confirmed) =
-            sqlx::query_scalar::<_, (Option<bool>, Option<bool>, bool)>(
-                r#"
+        let StatusSummary {
+            is_accepted,
+            can_sign,
+            is_confirmed,
+        } = sqlx::query_as::<_, StatusSummary>(
+            r#"
                 WITH RECURSIVE block_chain AS (
                     SELECT 
                         block_hash
@@ -805,8 +817,8 @@ impl super::DbRead for PgStore {
                 ),
                 SELECT
                     ds.is_accepted
-                  , TRUE AS can_sign
-                  , bc.block_hash IS NOT NULL AS confirmed_on_chain
+                  , ds.can_sign
+                  , bc.block_hash IS NOT NULL AS is_confirmed
                 FROM sbtc_signer.deposit_requests AS dr 
                 JOIN sbtc_signer.bitcoin_transactions USING (txid)
                 JOIN sbtc_signer.bitcoin_blocks USING (block_hash)
@@ -819,15 +831,15 @@ impl super::DbRead for PgStore {
                   AND dr.output_index = $4
                 LIMIT 1
             "#,
-            )
-            .bind(chain_tip)
-            .bind(min_block_height)
-            .bind(txid)
-            .bind(i64::from(output_index))
-            .bind(signer_public_key)
-            .fetch_one(&self.0)
-            .await
-            .map_err(Error::SqlxQuery)?;
+        )
+        .bind(chain_tip)
+        .bind(min_block_height)
+        .bind(txid)
+        .bind(i32::try_from(output_index).map_err(Error::ConversionDatabaseInt)?)
+        .bind(signer_public_key)
+        .fetch_one(&self.0)
+        .await
+        .map_err(Error::SqlxQuery)?;
 
         let status = if is_confirmed {
             DepositRequestConfirmationStatus::Confirmed
