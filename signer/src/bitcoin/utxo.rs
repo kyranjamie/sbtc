@@ -1108,13 +1108,12 @@ impl BitcoinTx {
 /// The responses for validation of a sweep transaction on bitcoin.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum BitcoinSweepErrorMsg {
-    /// The signer does not have a record of the deposit request in our
-    /// database.
-    #[error("the signer does not have a record of the deposit request")]
-    UnknownDepositRequest,
-    /// The signer has rejected the deposit request.
-    #[error("the signer has not accepted the deposit request")]
-    RejectedDepositRequest,
+    ///
+    #[error("the assessed fee for a deposit would exceed their max-fee")]
+    AssessedDepositFeeTooHigh,
+    ///
+    #[error("the assessed fee for a withdrawal would exceed their max-fee")]
+    AssessedWithdrawalFeeTooHigh,
     /// The signer is not part of the signer set that generated the
     /// aggregate public key used to lock the deposit funds.
     #[error("the signer is not part of the signing set for the aggregate public key")]
@@ -1123,14 +1122,6 @@ pub enum BitcoinSweepErrorMsg {
     /// that is not part of the canonical bitcoin blockchain.
     #[error("deposit transaction not on canonical bitcoin blockchain")]
     DepositTxReorged,
-    /// The signers' UTXO is not locked with the latest aggregate public
-    /// key.
-    #[error("signers' UTXO locked with incorrect scriptPubKey")]
-    InvalidSignerUtxo,
-    /// The OP_RETURN UTXO must have an amount of zero and include the
-    /// expected signer bitmap, and merkle tree.
-    #[error("signers' OP_RETRUN output does not match what is expected")]
-    InvalidOpReturnOutput,
     /// The fee paid to bitcoin miners is 10 times higher than we would
     /// have paid.
     #[error("the tx fee is more than 10 times the expected fee")]
@@ -1142,11 +1133,34 @@ pub enum BitcoinSweepErrorMsg {
     #[error("the amount in the withdrawal request does not match the amount in our records")]
     IncorrectWithdrawalAmount,
     /// One of the output amounts does not match the amount in the withdrawal request.
-    #[error("the signer does not have a recored of the withdrawal request")]
-    UnknownWithdrawalRequest,
-    /// One of the output amounts does not match the amount in the withdrawal request.
     #[error("the scriptPubKey for a withdrawal UTXO does not match the one in our records")]
     IncorrectWithdrawalRecipient,
+    /// The signers' UTXO is not locked with the latest aggregate public
+    /// key.
+    #[error("signers' UTXO locked with incorrect scriptPubKey")]
+    InvalidSignerUtxo,
+    /// All UTXOs must be either the signers, an OP_RETURN UTXO with zero
+    /// amount, or a UTXO servicing a withdrawal request.
+    #[error("one of the UTXOs is unexpected")]
+    InvalidUtxo,
+    /// The OP_RETURN UTXO must have an amount of zero and include the
+    /// expected signer bitmap, and merkle tree.
+    #[error("signers' OP_RETRUN output does not match what is expected")]
+    InvalidOpReturnOutput,
+    /// Given the current time and block height, it would be imprudent to
+    /// attempt to sweep in a deposit request with the given lock-time.
+    #[error("lock-time expiration is too soon")]
+    LockTimeExpirationTooSoon,
+    /// The signer has rejected the deposit request.
+    #[error("the signer has not accepted the deposit request")]
+    RejectedDepositRequest,
+    /// The signer does not have a record of the deposit request in our
+    /// database.
+    #[error("the signer does not have a record of the deposit request")]
+    UnknownDepositRequest,
+    /// One of the output amounts does not match the amount in the withdrawal request.
+    #[error("the signer does not have a recored of the withdrawal request")]
+    UnknownWithdrawalRequest,
 }
 
 #[cfg(test)]
