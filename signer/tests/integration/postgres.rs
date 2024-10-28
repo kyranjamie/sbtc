@@ -1233,31 +1233,15 @@ async fn we_can_fetch_bitcoin_txs_from_db() {
     let tx = test_data.bitcoin_transactions.choose(&mut rng).unwrap();
 
     // Now let's try fetching this transaction
-    let btc_tx = pg_store
-        .get_bitcoin_tx(&tx.txid, &tx.block_hash)
-        .await
-        .unwrap()
-        .unwrap();
+    let btc_tx = pg_store.get_bitcoin_tx(&tx.txid).await.unwrap().unwrap();
 
     assert_eq!(btc_tx.compute_txid(), tx.txid.into());
 
     // Now let's try fetching this transaction when we know it is missing.
     let txid: BitcoinTxId = fake::Faker.fake_with_rng(&mut rng);
-    let block_hash: BitcoinBlockHash = fake::Faker.fake_with_rng(&mut rng);
     // Actual block but missing txid
-    let btc_tx = pg_store
-        .get_bitcoin_tx(&txid, &tx.block_hash)
-        .await
-        .unwrap();
-    assert!(btc_tx.is_none());
-    // Actual txid but missing block
-    let btc_tx = pg_store
-        .get_bitcoin_tx(&tx.txid, &block_hash)
-        .await
-        .unwrap();
-    assert!(btc_tx.is_none());
-    // Now everything is missing
-    let btc_tx = pg_store.get_bitcoin_tx(&txid, &block_hash).await.unwrap();
+    let btc_tx = pg_store.get_bitcoin_tx(&txid).await.unwrap();
+
     assert!(btc_tx.is_none());
 
     signer::testing::storage::drop_db(pg_store).await;

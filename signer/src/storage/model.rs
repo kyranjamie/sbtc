@@ -140,46 +140,6 @@ pub struct DepositSigner {
     pub can_sign: bool,
 }
 
-/// An enum for the confirmation status of a deposit request.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DepositRequestConfirmationStatus {
-    /// We have no record of the deposit request.
-    NoRecord,
-    /// We have a record of the deposit request transaction, and it has been
-    /// confirmed on the canonical bitcoin blockchain.
-    Confirmed,
-    /// We have a record of the deposit request transaction, and it has not
-    /// been confirmed on the canonical bitcoin blockchain.
-    ///
-    /// Under normal operation, we will almost certainly have a record of a
-    /// deposit request, and we require that the deposit transaction be
-    /// confirmed before we write it to our database. But the deposit
-    /// transaction can be affected by a bitcoin reorg, where it is no
-    /// longer confirmed on the canonical bitcoin blockchain. If this
-    /// happens when we query for the status then it will come back as
-    /// unconfirmed.
-    Unconfirmed,
-}
-
-/// A struct for the a status report summary of a deposit request for use
-/// in validation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DepositRequestReport {
-    /// The confirmation status of the deposit request transaction.
-    pub status: DepositRequestConfirmationStatus,
-    /// Whether this signer was part of the signing set associated with the
-    /// deposited funds. If the signer is not part of the signing set, then
-    /// we do not do a check of whether we will accept it otherwise.
-    ///
-    /// This should only be None if we do not have a record of the deposit
-    /// request.
-    pub can_sign: Option<bool>,
-    /// Whether this signer accepted the deposit request or not. This
-    /// should only be None if we do not have a record of the deposit
-    /// request or if we cannot sign for the deposited funds.
-    pub is_accepted: Option<bool>,
-}
-
 /// Withdraw request.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, sqlx::FromRow)]
 #[cfg_attr(feature = "testing", derive(fake::Dummy))]

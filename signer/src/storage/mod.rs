@@ -16,6 +16,8 @@ use std::future::Future;
 
 use blockstack_lib::types::chainstate::StacksBlockId;
 
+use crate::bitcoin::utxo::WithdrawalRequestReport;
+use crate::bitcoin::utxo::DepositRequestReport;
 use crate::bitcoin::utxo::SignerUtxo;
 use crate::error::Error;
 use crate::keys::PublicKey;
@@ -91,7 +93,7 @@ pub trait DbRead {
         txid: &model::BitcoinTxId,
         output_index: u32,
         signer_public_key: &PublicKey,
-    ) -> impl Future<Output = Result<model::DepositRequestReport, Error>> + Send;
+    ) -> impl Future<Output = Result<DepositRequestReport, Error>> + Send;
 
     /// Get signer decisions for a deposit request
     fn get_deposit_signers(
@@ -213,6 +215,13 @@ pub trait DbRead {
         aggregate_key: &PublicKey,
     ) -> impl Future<Output = Result<model::SignerVotes, Error>> + Send;
 
+    /// Fetch the given withdrawal request associated with the given
+    /// identifier.
+    fn get_withdrawal_request(
+        &self,
+        id: &model::QualifiedRequestId,
+    ) -> impl Future<Output = Result<WithdrawalRequestReport, Error>> + Send;
+
     /// Check that the given block hash is included in the canonical
     /// bitcoin blockchain, where the canonical blockchain is identified by
     /// the given `chain_tip`.
@@ -229,12 +238,10 @@ pub trait DbRead {
         script: &model::ScriptPubKey,
     ) -> impl Future<Output = Result<bool, Error>> + Send;
 
-    /// Fetch the bitcoin transaction that is included in the block
-    /// identified by the block hash.
+    /// Fetch the bitcoin transaction
     fn get_bitcoin_tx(
         &self,
         txid: &model::BitcoinTxId,
-        block_hash: &model::BitcoinBlockHash,
     ) -> impl Future<Output = Result<Option<model::BitcoinTx>, Error>> + Send;
 
     /// Fetch bitcoin transactions that have fulfilled a deposit request

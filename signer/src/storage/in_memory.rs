@@ -11,7 +11,10 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
+use crate::bitcoin::utxo::DepositRequestConfirmationStatus;
+use crate::bitcoin::utxo::DepositRequestReport;
 use crate::bitcoin::utxo::SignerUtxo;
+use crate::bitcoin::utxo::WithdrawalRequestReport;
 use crate::error::Error;
 use crate::keys::PublicKey;
 use crate::keys::PublicKeyXOnly;
@@ -64,8 +67,7 @@ pub struct Store {
     pub bitcoin_transactions_to_blocks: HashMap<model::BitcoinTxId, Vec<model::BitcoinBlockHash>>,
 
     /// Bitcoin transactions to blocks
-    pub bitcoin_transactions:
-        HashMap<(model::BitcoinTxId, model::BitcoinBlockHash), model::BitcoinTx>,
+    pub bitcoin_transactions: HashMap<model::BitcoinTxId, model::BitcoinTx>,
 
     /// Stacks blocks to transactions
     pub stacks_block_to_transactions: HashMap<model::StacksBlockHash, Vec<model::StacksTxId>>,
@@ -300,7 +302,7 @@ impl super::DbRead for SharedStore {
         txid: &model::BitcoinTxId,
         output_index: u32,
         signer_public_key: &PublicKey,
-    ) -> Result<model::DepositRequestReport, Error> {
+    ) -> Result<DepositRequestReport, Error> {
         let deposit_request = self
             .lock()
             .await
@@ -308,8 +310,8 @@ impl super::DbRead for SharedStore {
             .get(&(*txid, output_index))
             .cloned();
         if deposit_request.is_none() {
-            return Ok(model::DepositRequestReport {
-                status: model::DepositRequestConfirmationStatus::NoRecord,
+            return Ok(DepositRequestReport {
+                status: DepositRequestConfirmationStatus::NoRecord,
                 can_sign: None,
                 is_accepted: None,
             });
@@ -321,9 +323,9 @@ impl super::DbRead for SharedStore {
             .into_iter()
             .find(|x| &x.txid == txid && x.output_index == output_index);
         let status = if pending_deposit_request.is_none() {
-            model::DepositRequestConfirmationStatus::Unconfirmed
+            DepositRequestConfirmationStatus::Unconfirmed
         } else {
-            model::DepositRequestConfirmationStatus::Confirmed
+            DepositRequestConfirmationStatus::Confirmed
         };
         let signer_vote = self
             .get_deposit_signers(txid, output_index)
@@ -331,7 +333,7 @@ impl super::DbRead for SharedStore {
             .into_iter()
             .find(|vote| &vote.signer_pub_key == signer_public_key);
 
-        Ok(model::DepositRequestReport {
+        Ok(DepositRequestReport {
             status,
             can_sign: signer_vote.as_ref().map(|vote| vote.is_accepted),
             is_accepted: signer_vote.map(|vote| vote.is_accepted),
@@ -676,6 +678,13 @@ impl super::DbRead for SharedStore {
         }
     }
 
+    async fn get_withdrawal_request(
+        &self,
+        _id: &model::QualifiedRequestId,
+    ) -> Result<WithdrawalRequestReport, Error> {
+        unimplemented!()
+    }
+
     async fn in_canonical_bitcoin_blockchain(
         &self,
         chain_tip: &model::BitcoinBlockRef,
@@ -706,13 +715,9 @@ impl super::DbRead for SharedStore {
     async fn get_bitcoin_tx(
         &self,
         txid: &model::BitcoinTxId,
-        block_hash: &model::BitcoinBlockHash,
     ) -> Result<Option<model::BitcoinTx>, Error> {
         let store = self.lock().await;
-        let maybe_tx = store
-            .bitcoin_transactions
-            .get(&(*txid, *block_hash))
-            .cloned();
+        let maybe_tx = store.bitcoin_transactions.get(txid).cloned();
 
         Ok(maybe_tx)
     }

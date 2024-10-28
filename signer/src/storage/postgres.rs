@@ -14,6 +14,7 @@ use sqlx::PgExecutor;
 use stacks_common::types::chainstate::StacksAddress;
 
 use crate::bitcoin::utxo::SignerUtxo;
+use crate::bitcoin::utxo::WithdrawalRequestConfirmationStatus;
 use crate::error::Error;
 use crate::keys::PublicKey;
 use crate::keys::SignerScriptPubKey as _;
@@ -24,9 +25,10 @@ use crate::stacks::events::WithdrawalRejectEvent;
 use crate::storage::model;
 use crate::storage::model::TransactionType;
 
-use super::model::DepositRequestConfirmationStatus;
-use super::model::DepositRequestReport;
 use super::util::get_utxo;
+use crate::bitcoin::utxo::DepositRequestConfirmationStatus;
+use crate::bitcoin::utxo::DepositRequestReport;
+use crate::bitcoin::utxo::WithdrawalRequestReport;
 
 /// All migration scripts from the `signer/migrations` directory.
 static PGSQL_MIGRATIONS: include_dir::Dir =
@@ -720,6 +722,41 @@ impl super::DbRead for PgStore {
         .map_err(Error::SqlxQuery)
     }
 
+    async fn get_withdrawal_request(
+        &self,
+        id: &model::QualifiedRequestId,
+    ) -> Result<WithdrawalRequestReport, Error> {
+        sqlx::query_as::<_, model::WithdrawalRequest>(
+            r#"
+            SELECT
+                request_id
+              , txid
+              , block_hash
+              , recipient
+              , amount
+              , max_fee
+              , sender_address
+            FROM sbtc_signer.withdrawal_requests AS wr
+            WHERE wr.request_id = $1
+              AND wr.txid = $2
+              AND wr.block_hash = $3
+            "#,
+        )
+        .bind(i64::try_from(id.request_id).map_err(Error::ConversionDatabaseInt)?)
+        .bind(&id.txid)
+        .bind(&id.block_hash)
+        .fetch_optional(&self.0)
+        .await
+        .map_err(Error::SqlxQuery)?;
+
+        Ok(WithdrawalRequestReport {
+            status: WithdrawalRequestConfirmationStatus::Confirmed,
+            amount: None,
+            recipient: None,
+            max_fee: None,
+        })
+    }
+
     async fn get_accepted_deposit_requests(
         &self,
         signer: &PublicKey,
@@ -1018,12 +1055,12 @@ impl super::DbRead for PgStore {
         sqlx::query_as::<_, model::WithdrawalRequest>(
             r#"
             WITH RECURSIVE extended_context_window AS (
-                SELECT 
-                    block_hash
-                  , parent_hash
-                  , confirms
-                  , 1 AS depth
-                FROM sbtc_signer.bitcoin_blocks
+SELECT 
+block_hash
+, parent_hash
+, confirms
+, 1 AS depth
+FROM sbtc_signer.bitcoin_blocks
                 WHERE block_hash = $1
 
                 UNION ALL
@@ -1414,18 +1451,14 @@ impl super::DbRead for PgStore {
     async fn get_bitcoin_tx(
         &self,
         txid: &model::BitcoinTxId,
-        block_hash: &model::BitcoinBlockHash,
     ) -> Result<Option<model::BitcoinTx>, Error> {
         sqlx::query_scalar::<_, model::BitcoinTx>(
             r#"
             SELECT txs.tx
-            FROM sbtc_signer.bitcoin_transactions AS bt
-            JOIN sbtc_signer.transactions AS txs USING (txid)
-            WHERE bt.block_hash = $1
-              AND bt.txid = $2
+            FROM sbtc_signer.transactions AS txs
+            WHERE txs.txid = $1
         "#,
         )
-        .bind(block_hash)
         .bind(txid)
         .fetch_optional(&self.0)
         .await

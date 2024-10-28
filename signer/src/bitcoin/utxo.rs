@@ -1,5 +1,7 @@
 //! Utxo management and transaction construction
 
+use std::ops::Deref;
+
 use bitcoin::absolute::LockTime;
 use bitcoin::hashes::Hash as _;
 use bitcoin::sighash::Prevouts;
@@ -42,6 +44,7 @@ use crate::storage::model::ScriptPubKey;
 use crate::storage::model::SignerVotes;
 use crate::storage::model::StacksBlockHash;
 use crate::storage::model::StacksTxId;
+use crate::storage::DbRead;
 
 /// The minimum incremental fee rate in sats per virtual byte for RBF
 /// transactions.
@@ -1041,6 +1044,7 @@ impl bitcoin::consensus::Encodable for Hash160 {
 }
 
 /// The necessary information for validating a bitcoin transaction.
+#[derive(Debug, Clone)]
 pub struct BtcContext {
     /// This signer's current view of the chain tip of the canonical
     /// bitcoin blockchain. It is the block hash and height of the block on
@@ -1082,15 +1086,153 @@ impl BitcoinTx {
     }
 
     ///
+    async fn validate_signer_input<C>(&self, ctx: &C, req_ctx: &BtcContext) -> Result<Amount, Error>
+    where
+        C: Context + Send + Sync,
+    {
+        let db = ctx.get_storage();
+        let Some(signer_txo_input) = self.input.first() else {
+            return Err(BitcoinSweepErrorMsg::InvalidSignerUtxo.into_error(req_ctx, self));
+        };
+        let signer_txo_txid = signer_txo_input.previous_output.txid.into();
+
+        let Some(signer_tx) = db.get_bitcoin_tx(&signer_txo_txid).await? else {
+            return Err(BitcoinSweepErrorMsg::InvalidSignerUtxo.into_error(req_ctx, self));
+        };
+
+        let output_index = signer_txo_input
+            .previous_output
+            .vout
+            .try_into()
+            .map_err(|_| Error::TypeConversion)?;
+        let signer_prevout_utxo = signer_tx
+            .tx_out(output_index)
+            .map_err(Error::BitcoinOutputIndex)?;
+        let script = signer_prevout_utxo.script_pubkey.clone().into();
+
+        if !db.is_signer_script_pub_key(&script).await? {
+            return Err(BitcoinSweepErrorMsg::InvalidSignerUtxo.into_error(req_ctx, self));
+        }
+
+        Ok(signer_prevout_utxo.value)
+    }
+
+    ///
+    async fn validate_signer_output<C>(&self, ctx: &C, req_ctx: &BtcContext) -> Result<(), Error>
+    where
+        C: Context + Send + Sync,
+    {
+        let db = ctx.get_storage();
+        let Some(signer_txo_output) = self.output.first() else {
+            return Err(BitcoinSweepErrorMsg::InvalidSignerUtxo.into_error(req_ctx, self));
+        };
+
+        let script = signer_txo_output.script_pubkey.clone().into();
+
+        if !db.is_signer_script_pub_key(&script).await? {
+            return Err(BitcoinSweepErrorMsg::InvalidSignerUtxo.into_error(req_ctx, self));
+        }
+
+        Ok(())
+    }
+
+    ///
     pub async fn validate_deposits<C>(&self, ctx: &C, req_ctx: &BtcContext) -> Result<(), Error>
     where
         C: Context + Send + Sync,
     {
+        let db = ctx.get_storage();
+        let signer_public_key = PublicKey::from_private_key(&ctx.config().signer.private_key);
         // 1. All deposit requests consumed by the bitcoin transaction are
         //    accepted by the signer.
 
         for tx_in in self.input.iter().skip(1) {
-            // tx_in.
+            let outpoint = tx_in.previous_output;
+            let report = db
+                .get_deposit_request_report(
+                    &req_ctx.chain_tip.block_hash,
+                    &outpoint.txid.into(),
+                    outpoint.vout,
+                    &signer_public_key,
+                )
+                .await?;
+
+            match report.status {
+                DepositRequestConfirmationStatus::NoRecord => {
+                    return Err(
+                        BitcoinSweepErrorMsg::UnknownDepositRequest.into_error(req_ctx, self)
+                    )
+                }
+                DepositRequestConfirmationStatus::Unconfirmed => {
+                    return Err(BitcoinSweepErrorMsg::DepositTxReorged.into_error(req_ctx, self))
+                }
+                _ => (),
+            };
+
+            if report.can_sign.is_none() {
+                return Err(BitcoinSweepErrorMsg::NoDepositRequestVote.into_error(req_ctx, self));
+            }
+
+            if report.can_sign != Some(true) {
+                return Err(
+                    BitcoinSweepErrorMsg::CannotSignDepositRequest.into_error(req_ctx, self)
+                );
+            }
+
+            if report.is_accepted != Some(true) {
+                return Err(BitcoinSweepErrorMsg::RejectedDepositRequest.into_error(req_ctx, self));
+            }
+        }
+
+        Ok(())
+    }
+
+    ///
+    async fn validate_deposit<C>(
+        &self,
+        tx_in: &TxIn,
+        ctx: &C,
+        req_ctx: &BtcContext,
+    ) -> Result<(), Error>
+    where
+        C: Context + Send + Sync,
+    {
+        let db = ctx.get_storage();
+        let signer_public_key = PublicKey::from_private_key(&ctx.config().signer.private_key);
+
+        let outpoint = tx_in.previous_output;
+        let report = db
+            .get_deposit_request_report(
+                &req_ctx.chain_tip.block_hash,
+                &outpoint.txid.into(),
+                outpoint.vout,
+                &signer_public_key,
+            )
+            .await?;
+
+        match report.status {
+            DepositRequestConfirmationStatus::NoRecord => {
+                return Err(BitcoinSweepErrorMsg::UnknownDepositRequest.into_error(req_ctx, self));
+            }
+            DepositRequestConfirmationStatus::Unconfirmed => {
+                return Err(BitcoinSweepErrorMsg::DepositTxReorged.into_error(req_ctx, self));
+            }
+            DepositRequestConfirmationStatus::Spent => {
+                return Err(BitcoinSweepErrorMsg::DepositUtxoSpent.into_error(req_ctx, self));
+            }
+            DepositRequestConfirmationStatus::Confirmed => (),
+        };
+
+        if report.can_sign.is_none() {
+            return Err(BitcoinSweepErrorMsg::NoDepositRequestVote.into_error(req_ctx, self));
+        }
+
+        if report.can_sign != Some(true) {
+            return Err(BitcoinSweepErrorMsg::CannotSignDepositRequest.into_error(req_ctx, self));
+        }
+
+        if report.is_accepted != Some(true) {
+            return Err(BitcoinSweepErrorMsg::RejectedDepositRequest.into_error(req_ctx, self));
         }
 
         Ok(())
@@ -1101,12 +1243,39 @@ impl BitcoinTx {
     where
         C: Context + Send + Sync,
     {
+        let db = ctx.get_storage();
+
+        let withdrawal_iter = self.output.iter().skip(2).zip(req_ctx.request_ids.iter());
+        for (utxo, req_id) in withdrawal_iter {
+            let report = db.get_withdrawal_request(&req_id).await?;
+            
+            match report.status {
+                WithdrawalRequestConfirmationStatus::NoRecord => {
+                return Err(BitcoinSweepErrorMsg::UnknownWithdrawalRequest.into_error(req_ctx, self));
+                },
+                WithdrawalRequestConfirmationStatus::Fulfilled => {
+                    return Err(BitcoinSweepErrorMsg::UnknownWithdrawalRequest.into_error(req_ctx, self));
+                }
+                _ => ()
+            };
+
+            let ans = [1,2,3];
+            let [thing, _] = ans.first_chunk().unwrap();
+
+            if report.amount != Some(utxo.value.to_sat()) {
+                return Err(BitcoinSweepErrorMsg::IncorrectWithdrawalAmount.into_error(req_ctx, self));
+            }
+
+            if report.recipient.as_deref() != Some(&utxo.script_pubkey) {
+                return Err(BitcoinSweepErrorMsg::IncorrectWithdrawalRecipient.into_error(req_ctx, self));
+            }
+        }
         Ok(())
     }
 }
 
 /// The responses for validation of a sweep transaction on bitcoin.
-#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
 pub enum BitcoinSweepErrorMsg {
     ///
     #[error("the assessed fee for a deposit would exceed their max-fee")]
@@ -1122,6 +1291,9 @@ pub enum BitcoinSweepErrorMsg {
     /// that is not part of the canonical bitcoin blockchain.
     #[error("deposit transaction not on canonical bitcoin blockchain")]
     DepositTxReorged,
+    ///
+    #[error("deposit transaction not on canonical bitcoin blockchain")]
+    DepositUtxoSpent,
     /// The fee paid to bitcoin miners is 10 times higher than we would
     /// have paid.
     #[error("the tx fee is more than 10 times the expected fee")]
@@ -1151,6 +1323,10 @@ pub enum BitcoinSweepErrorMsg {
     /// attempt to sweep in a deposit request with the given lock-time.
     #[error("lock-time expiration is too soon")]
     LockTimeExpirationTooSoon,
+    /// The signer does not have a record of the deposit request in our
+    /// database.
+    #[error("the signer does not have a record of the deposit request")]
+    NoDepositRequestVote,
     /// The signer has rejected the deposit request.
     #[error("the signer has not accepted the deposit request")]
     RejectedDepositRequest,
@@ -1162,6 +1338,125 @@ pub enum BitcoinSweepErrorMsg {
     #[error("the signer does not have a recored of the withdrawal request")]
     UnknownWithdrawalRequest,
 }
+
+/// A struct for a bitcoin validation error containing all the necessary
+/// context.
+#[derive(Debug)]
+pub struct BitcoinValidationError {
+    /// The specific error that happened during validation.
+    pub error: BitcoinSweepErrorMsg,
+    /// The additional information that was used when trying to
+    /// validate the complete-deposit contract call. This includes the
+    /// public key of the signer that was attempting to generate the
+    /// `complete-deposit` transaction.
+    pub context: BtcContext,
+    /// The specific transaction that was being validated.
+    pub tx: BitcoinTx,
+}
+
+impl std::fmt::Display for BitcoinValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // TODO(191): Add the other variables to the error message.
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for BitcoinValidationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+impl BitcoinSweepErrorMsg {
+    fn into_error(self, ctx: &BtcContext, tx: &BitcoinTx) -> Error {
+        Error::BitcoinValidation(Box::new(BitcoinValidationError {
+            error: self,
+            context: ctx.clone(),
+            tx: tx.clone(),
+        }))
+    }
+}
+
+/// An enum for the confirmation status of a deposit request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DepositRequestConfirmationStatus {
+    /// We have no record of the deposit request.
+    NoRecord,
+    /// We have a record of the deposit request transaction, and it has been
+    /// confirmed on the canonical bitcoin blockchain. It remains unspent.
+    Confirmed,
+    /// We have a record of the deposit request being included as an input
+    /// in another bitcoin transaction that has been confirmed on the
+    /// canonical bitcoin blockchain.
+    Spent,
+    /// We have a record of the deposit request transaction, and it has not
+    /// been confirmed on the canonical bitcoin blockchain.
+    ///
+    /// Under normal operation, we will almost certainly have a record of a
+    /// deposit request, and we require that the deposit transaction be
+    /// confirmed before we write it to our database. But the deposit
+    /// transaction can be affected by a bitcoin reorg, where it is no
+    /// longer confirmed on the canonical bitcoin blockchain. If this
+    /// happens when we query for the status then it will come back as
+    /// unconfirmed.
+    Unconfirmed,
+}
+
+/// A struct for the a status report summary of a deposit request for use
+/// in validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DepositRequestReport {
+    /// The confirmation status of the deposit request transaction.
+    pub status: DepositRequestConfirmationStatus,
+    /// Whether this signer was part of the signing set associated with the
+    /// deposited funds. If the signer is not part of the signing set, then
+    /// we do not do a check of whether we will accept it otherwise.
+    ///
+    /// This should only be None if we do not have a record of the deposit
+    /// request.
+    pub can_sign: Option<bool>,
+    /// Whether this signer accepted the deposit request or not. This
+    /// should only be None if we do not have a record of the deposit
+    /// request or if we cannot sign for the deposited funds.
+    pub is_accepted: Option<bool>,
+}
+
+/// An enum for the confirmation status of a deposit request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WithdrawalRequestConfirmationStatus {
+    /// We have no record of the deposit request.
+    NoRecord,
+    /// We have a record of the withdrawal request event, and it has been
+    /// confirmed on the canonical stacks blockchain. It remains
+    /// unfulfilled.
+    Confirmed,
+    /// We have a record of the withdrawal request event, and it has been
+    /// confirmed on the canonical stacks blockchain. It has been
+    /// fulfilled.
+    Fulfilled,
+}
+
+/// A struct for the a status report summary of a deposit request for use
+/// in validation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithdrawalRequestReport {
+    /// The confirmation status of the deposit request transaction.
+    pub status: WithdrawalRequestConfirmationStatus,
+    /// Whether this signer was part of the signing set associated with the
+    /// deposited funds. If the signer is not part of the signing set, then
+    /// we do not do a check of whether we will accept it otherwise.
+    ///
+    /// This should only be None if we do not have a record of the deposit
+    /// request.
+    pub amount: Option<u64>,
+    /// Whether this signer accepted the deposit request or not. This
+    /// should only be None if we do not have a record of the deposit
+    /// request or if we cannot sign for the deposited funds.
+    pub recipient: Option<ScriptPubKey>,
+    /// request or if we cannot sign for the deposited funds.
+    pub max_fee: Option<u64>,
+}
+
 
 #[cfg(test)]
 mod tests {

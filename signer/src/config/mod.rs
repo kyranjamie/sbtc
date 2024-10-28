@@ -24,6 +24,7 @@ use crate::stacks::wallet::SignerWallet;
 mod error;
 mod serialization;
 
+///
 pub const MAX_BITCOIN_PROCESSING_DELAY_S: u64 = 300;
 
 /// Trait for validating configuration values.
