@@ -45,7 +45,7 @@ pub enum Error {
 
     /// to exist in bitcoin core but it does not.
     #[error("transaction is missing, txid: {0}")]
-    BitcoinValidation(#[from] Box<crate::bitcoin::utxo::BitcoinValidationError>),
+    BitcoinValidation(#[from] Box<crate::bitcoin::validation::BitcoinValidationError>),
 
     /// Received an error in call to estimatesmartfee RPC call
     #[error("failed to get fee estimate from bitcoin-core for target {1}. {0}")]

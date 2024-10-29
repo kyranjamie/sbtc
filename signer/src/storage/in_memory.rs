@@ -11,10 +11,10 @@ use std::sync::Arc;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
-use crate::bitcoin::utxo::DepositRequestConfirmationStatus;
-use crate::bitcoin::utxo::DepositRequestReport;
 use crate::bitcoin::utxo::SignerUtxo;
-use crate::bitcoin::utxo::WithdrawalRequestReport;
+use crate::bitcoin::validation::DepositRequestConfirmationStatus;
+use crate::bitcoin::validation::DepositRequestReport;
+use crate::bitcoin::validation::WithdrawalRequestReport;
 use crate::error::Error;
 use crate::keys::PublicKey;
 use crate::keys::PublicKeyXOnly;
@@ -314,6 +314,7 @@ impl super::DbRead for SharedStore {
                 status: DepositRequestConfirmationStatus::NoRecord,
                 can_sign: None,
                 is_accepted: None,
+                amount: None,
             });
         }
 
@@ -337,6 +338,7 @@ impl super::DbRead for SharedStore {
             status,
             can_sign: signer_vote.as_ref().map(|vote| vote.is_accepted),
             is_accepted: signer_vote.map(|vote| vote.is_accepted),
+            amount: deposit_request.map(|request| request.amount),
         })
     }
 

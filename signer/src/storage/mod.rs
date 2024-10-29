@@ -16,9 +16,9 @@ use std::future::Future;
 
 use blockstack_lib::types::chainstate::StacksBlockId;
 
-use crate::bitcoin::utxo::WithdrawalRequestReport;
-use crate::bitcoin::utxo::DepositRequestReport;
 use crate::bitcoin::utxo::SignerUtxo;
+use crate::bitcoin::validation::DepositRequestReport;
+use crate::bitcoin::validation::WithdrawalRequestReport;
 use crate::error::Error;
 use crate::keys::PublicKey;
 use crate::stacks::events::CompletedDepositEvent;

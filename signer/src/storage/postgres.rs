@@ -14,7 +14,10 @@ use sqlx::PgExecutor;
 use stacks_common::types::chainstate::StacksAddress;
 
 use crate::bitcoin::utxo::SignerUtxo;
-use crate::bitcoin::utxo::WithdrawalRequestConfirmationStatus;
+use crate::bitcoin::validation::DepositRequestConfirmationStatus;
+use crate::bitcoin::validation::DepositRequestReport;
+use crate::bitcoin::validation::WithdrawalRequestConfirmationStatus;
+use crate::bitcoin::validation::WithdrawalRequestReport;
 use crate::error::Error;
 use crate::keys::PublicKey;
 use crate::keys::SignerScriptPubKey as _;
@@ -26,9 +29,6 @@ use crate::storage::model;
 use crate::storage::model::TransactionType;
 
 use super::util::get_utxo;
-use crate::bitcoin::utxo::DepositRequestConfirmationStatus;
-use crate::bitcoin::utxo::DepositRequestReport;
-use crate::bitcoin::utxo::WithdrawalRequestReport;
 
 /// All migration scripts from the `signer/migrations` directory.
 static PGSQL_MIGRATIONS: include_dir::Dir =
@@ -806,6 +806,7 @@ impl super::DbRead for PgStore {
                 status: DepositRequestConfirmationStatus::NoRecord,
                 can_sign: None,
                 is_accepted: None,
+                amount: None,
             });
         };
 
@@ -814,6 +815,8 @@ impl super::DbRead for PgStore {
             is_accepted: Option<bool>,
             can_sign: Option<bool>,
             is_confirmed: bool,
+            #[sqlx(try_from = "i64")]
+            amount: u64,
         }
 
         // In this query we list out the blockchain as far back as is
@@ -830,6 +833,7 @@ impl super::DbRead for PgStore {
             is_accepted,
             can_sign,
             is_confirmed,
+            amount,
         } = sqlx::query_as::<_, StatusSummary>(
             r#"
                 WITH RECURSIVE block_chain AS (
@@ -855,6 +859,7 @@ impl super::DbRead for PgStore {
                 SELECT
                     ds.is_accepted
                   , ds.can_sign
+                  , dr.amount
                   , bc.block_hash IS NOT NULL AS is_confirmed
                 FROM sbtc_signer.deposit_requests AS dr 
                 JOIN sbtc_signer.bitcoin_transactions USING (txid)
@@ -884,7 +889,12 @@ impl super::DbRead for PgStore {
             DepositRequestConfirmationStatus::Unconfirmed
         };
 
-        Ok(DepositRequestReport { status, can_sign, is_accepted })
+        Ok(DepositRequestReport {
+            status,
+            can_sign,
+            is_accepted,
+            amount: Some(amount),
+        })
     }
 
     async fn get_deposit_signers(
