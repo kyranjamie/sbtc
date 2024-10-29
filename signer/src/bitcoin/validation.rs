@@ -67,7 +67,12 @@ impl BitcoinTxContext {
     }
 
     fn validate_fees(&self, _input_amounts: Amount) -> Result<(), Error> {
-        let _output_amounts = self.tx.output.iter().map(|tx_out| tx_out.value).sum::<Amount>();
+        let _output_amounts = self
+            .tx
+            .output
+            .iter()
+            .map(|tx_out| tx_out.value)
+            .sum::<Amount>();
 
         Ok(())
     }
@@ -187,6 +192,12 @@ pub enum BitcoinInputError {
     AssessedDepositFeeTooHigh,
     /// The signer is not part of the signer set that generated the
     /// aggregate public key used to lock the deposit funds.
+    ///
+    /// TODO: For v1 every signer should be able to sign for all deposits,
+    /// but for v2 this will not be the case. So we'll need to decide
+    /// whether a particular deposit cannot be signed by a particular
+    /// signers means that the entire transaction is rejected from that
+    /// signer.
     #[error("the signer is not part of the signing set for the aggregate public key")]
     CannotSignDepositRequest,
     /// The deposit transaction has been been confirmed on a bitcoin block
