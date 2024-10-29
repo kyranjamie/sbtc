@@ -1055,12 +1055,12 @@ impl super::DbRead for PgStore {
         sqlx::query_as::<_, model::WithdrawalRequest>(
             r#"
             WITH RECURSIVE extended_context_window AS (
-SELECT 
-block_hash
-, parent_hash
-, confirms
-, 1 AS depth
-FROM sbtc_signer.bitcoin_blocks
+                SELECT 
+                    block_hash
+                  , parent_hash
+                  , confirms
+                  , 1 AS depth
+                FROM sbtc_signer.bitcoin_blocks
                 WHERE block_hash = $1
 
                 UNION ALL
