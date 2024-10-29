@@ -628,6 +628,8 @@ where
         Ok(())
     }
 
+    /// No it doesn't need to filter on the lock time.
+    ///
     /// TODO(#380): This function needs to filter deposit requests based on
     /// time as well. We need to do this because deposit requests are locked
     /// using OP_CSV, which lock up coins based on block height or

@@ -23,6 +23,9 @@ pub struct BitcoinTxContext {
     /// the bitcoin blockchain with the greatest height. On ties, we sort
     /// by the block hash descending and take the first one.
     pub chain_tip: BitcoinBlockHash,
+    /// The block height of the bitcoin chain tip identified by the
+    /// `chain_tip` field.
+    pub chain_tip_height: u64,
     /// How many bitcoin blocks back from the chain tip the signer will
     /// look for requests.
     pub tx: BitcoinTx,
@@ -141,20 +144,22 @@ impl BitcoinTxContext {
         let mut deposit_amount = 0;
 
         for tx_in in self.tx.input.iter().skip(1) {
-            let outpoint = tx_in.previous_output;
-            let report = db
-                .get_deposit_request_report(
-                    &self.chain_tip,
-                    &outpoint.txid.into(),
-                    outpoint.vout,
-                    &signer_public_key,
-                )
-                .await?;
+            let txid = tx_in.previous_output.txid.into();
+            let report_future = db.get_deposit_request_report(
+                &self.chain_tip,
+                &txid,
+                tx_in.previous_output.vout,
+                &signer_public_key,
+            );
 
-            deposit_amount += report.amount.unwrap_or(0);
+            let Some(report) = report_future.await? else {
+                return Err(BitcoinInputError::UnknownDepositRequest.into_error(self));
+            };
+
+            deposit_amount += report.amount;
 
             report
-                .validate(outpoint)
+                .validate(tx_in.previous_output)
                 .map_err(|err| err.into_error(self))?;
         }
 
@@ -325,10 +330,9 @@ impl BitcoinOutputError {
 /// An enum for the confirmation status of a deposit request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepositRequestConfirmationStatus {
-    /// We have no record of the deposit request.
-    NoRecord,
-    /// We have a record of the deposit request transaction, and it has been
-    /// confirmed on the canonical bitcoin blockchain. It remains unspent.
+    /// We have a record of the deposit request transaction, and it has
+    /// been confirmed on the canonical bitcoin blockchain. We have not
+    /// spent these funds.
     Confirmed,
     /// We have a record of the deposit request being included as an input
     /// in another bitcoin transaction that has been confirmed on the
@@ -337,13 +341,12 @@ pub enum DepositRequestConfirmationStatus {
     /// We have a record of the deposit request transaction, and it has not
     /// been confirmed on the canonical bitcoin blockchain.
     ///
-    /// Under normal operation, we will almost certainly have a record of a
-    /// deposit request, and we require that the deposit transaction be
-    /// confirmed before we write it to our database. But the deposit
-    /// transaction can be affected by a bitcoin reorg, where it is no
-    /// longer confirmed on the canonical bitcoin blockchain. If this
-    /// happens when we query for the status then it will come back as
-    /// unconfirmed.
+    /// Usually we will almost certainly have a record of a deposit
+    /// request, and we require that the deposit transaction be confirmed
+    /// before we write it to our database. But the deposit transaction can
+    /// be affected by a bitcoin reorg, where it is no longer confirmed on
+    /// the canonical bitcoin blockchain. If this happens when we query for
+    /// the status then it will come back as unconfirmed.
     Unconfirmed,
 }
 
@@ -365,15 +368,14 @@ pub struct DepositRequestReport {
     /// request or if we cannot sign for the deposited funds.
     pub is_accepted: Option<bool>,
     /// The deposit amount
-    pub amount: Option<u64>,
+    pub amount: u64,
+    /// The lock_time in the reclaim script
+    pub lock_time: bitcoin::relative::LockTime,
 }
 
 impl DepositRequestReport {
     fn validate(self, _: OutPoint) -> Result<(), BitcoinInputError> {
         match self.status {
-            DepositRequestConfirmationStatus::NoRecord => {
-                return Err(BitcoinInputError::UnknownDepositRequest);
-            }
             DepositRequestConfirmationStatus::Unconfirmed => {
                 return Err(BitcoinInputError::DepositTxReorged);
             }

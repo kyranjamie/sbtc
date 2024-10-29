@@ -794,7 +794,7 @@ impl super::DbRead for PgStore {
         txid: &model::BitcoinTxId,
         output_index: u32,
         signer_public_key: &PublicKey,
-    ) -> Result<DepositRequestReport, Error> {
+    ) -> Result<Option<DepositRequestReport>, Error> {
         // We first get the lowest height for when the deposit request was
         // confirmed. This height serves as the stopping criteria for the
         // recursive part of the subsequent query.
@@ -802,19 +802,19 @@ impl super::DbRead for PgStore {
         // None is only returned if we do not have a record of the deposit
         // request.
         let Some(min_block_height) = min_height_fut.await? else {
-            return Ok(DepositRequestReport {
-                status: DepositRequestConfirmationStatus::NoRecord,
-                can_sign: None,
-                is_accepted: None,
-                amount: None,
-            });
+            return Ok(None);
         };
 
         #[derive(Debug, sqlx::FromRow)]
         struct StatusSummary {
+            // The current signer may not have a record of their vote for
+            // the deposit. In this case the `is_accepted` and `can_sign`
+            // fields will be None.
             is_accepted: Option<bool>,
             can_sign: Option<bool>,
             is_confirmed: bool,
+            #[sqlx(try_from = "i64")]
+            lock_time: u32,
             #[sqlx(try_from = "i64")]
             amount: u64,
         }
@@ -829,12 +829,7 @@ impl super::DbRead for PgStore {
         // Note that because of the above query and early exit, we know
         // that we have a record of the deposit request, so this query will
         // return exactly one row.
-        let StatusSummary {
-            is_accepted,
-            can_sign,
-            is_confirmed,
-            amount,
-        } = sqlx::query_as::<_, StatusSummary>(
+        let summary = sqlx::query_as::<_, StatusSummary>(
             r#"
                 WITH RECURSIVE block_chain AS (
                     SELECT 
@@ -860,6 +855,7 @@ impl super::DbRead for PgStore {
                     ds.is_accepted
                   , ds.can_sign
                   , dr.amount
+                  , dr.lock_time
                   , bc.block_hash IS NOT NULL AS is_confirmed
                 FROM sbtc_signer.deposit_requests AS dr 
                 JOIN sbtc_signer.bitcoin_transactions USING (txid)
@@ -883,18 +879,20 @@ impl super::DbRead for PgStore {
         .await
         .map_err(Error::SqlxQuery)?;
 
-        let status = if is_confirmed {
+        let status = if summary.is_confirmed {
             DepositRequestConfirmationStatus::Confirmed
         } else {
             DepositRequestConfirmationStatus::Unconfirmed
         };
 
-        Ok(DepositRequestReport {
+        Ok(Some(DepositRequestReport {
             status,
-            can_sign,
-            is_accepted,
-            amount: Some(amount),
-        })
+            can_sign: summary.can_sign,
+            is_accepted: summary.is_accepted,
+            amount: summary.amount,
+            lock_time: bitcoin::relative::LockTime::from_consensus(summary.lock_time)
+                .map_err(Error::DisabledLockTime)?,
+        }))
     }
 
     async fn get_deposit_signers(

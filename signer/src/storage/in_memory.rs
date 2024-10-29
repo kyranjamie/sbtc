@@ -302,21 +302,16 @@ impl super::DbRead for SharedStore {
         txid: &model::BitcoinTxId,
         output_index: u32,
         signer_public_key: &PublicKey,
-    ) -> Result<DepositRequestReport, Error> {
+    ) -> Result<Option<DepositRequestReport>, Error> {
         let deposit_request = self
             .lock()
             .await
             .deposit_requests
             .get(&(*txid, output_index))
             .cloned();
-        if deposit_request.is_none() {
-            return Ok(DepositRequestReport {
-                status: DepositRequestConfirmationStatus::NoRecord,
-                can_sign: None,
-                is_accepted: None,
-                amount: None,
-            });
-        }
+        let Some(deposit_request) = deposit_request else {
+            return Ok(None);
+        };
 
         let pending_deposit_request = self
             .get_pending_deposit_requests(chain_tip, 100)
@@ -334,12 +329,14 @@ impl super::DbRead for SharedStore {
             .into_iter()
             .find(|vote| &vote.signer_pub_key == signer_public_key);
 
-        Ok(DepositRequestReport {
+        Ok(Some(DepositRequestReport {
             status,
             can_sign: signer_vote.as_ref().map(|vote| vote.is_accepted),
             is_accepted: signer_vote.map(|vote| vote.is_accepted),
-            amount: deposit_request.map(|request| request.amount),
-        })
+            amount: deposit_request.amount,
+            lock_time: bitcoin::relative::LockTime::from_consensus(deposit_request.lock_time)
+                .map_err(Error::DisabledLockTime)?,
+        }))
     }
 
     async fn get_deposit_signers(
