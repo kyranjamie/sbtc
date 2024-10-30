@@ -1,7 +1,5 @@
 //! validation of bitcoin transactions.
 
-// use std::ops::Deref;
-
 use bitcoin::relative::LockTime;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -195,7 +193,7 @@ impl BitcoinTxContext {
 /// The responses for validation of a sweep transaction on bitcoin.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
 pub enum BitcoinInputError {
-    ///
+    /// The assessed exceeds the max-fee in the deposit request.
     #[error("the assessed fee for a deposit would exceed their max-fee, {0}")]
     AssessedDepositFeeTooHigh(OutPoint),
     /// The signer is not part of the signer set that generated the
@@ -208,7 +206,7 @@ pub enum BitcoinInputError {
     /// signer.
     #[error("the signer is not part of the signing set for the aggregate public key, {0}")]
     CannotSignDepositRequest(OutPoint),
-    /// The deposit transaction has been been confirmed on a bitcoin block
+    /// The deposit transaction has been confirmed on a bitcoin block
     /// that is not part of the canonical bitcoin blockchain.
     #[error("deposit transaction not on canonical bitcoin blockchain, {0}")]
     DepositTxNotOnBestChain(OutPoint),
@@ -243,7 +241,7 @@ pub enum BitcoinInputError {
 /// The responses for validation of a sweep transaction on bitcoin.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
 pub enum BitcoinOutputError {
-    ///
+    /// The assessed exceeds the max-fee in the withdrawal request.
     #[error("the assessed fee for a withdrawal would exceed their max-fee")]
     AssessedWithdrawalFeeTooHigh,
     /// One of the output amounts does not match the amount in the withdrawal request.
@@ -262,7 +260,7 @@ pub enum BitcoinOutputError {
     InvalidUtxo,
     /// The OP_RETURN UTXO must have an amount of zero and include the
     /// expected signer bitmap, and merkle tree.
-    #[error("signers' OP_RETRUN output does not match what is expected")]
+    #[error("signers' OP_RETURN output does not match what is expected")]
     InvalidOpReturnOutput,
     /// The signer does not have a record of the deposit request in our
     /// database.
@@ -272,10 +270,10 @@ pub enum BitcoinOutputError {
     #[error("the signer has not accepted the deposit request")]
     RejectedWithdrawalRequest,
     /// One of the output amounts does not match the amount in the withdrawal request.
-    #[error("the signer does not have a recored of the withdrawal request")]
+    #[error("the signer does not have a record of the withdrawal request")]
     UnknownWithdrawalRequest,
     /// One of the output amounts does not match the amount in the withdrawal request.
-    #[error("the signer does not have a recored of the withdrawal request")]
+    #[error("the signer does not have a record of the withdrawal request")]
     UnexpectedOutput,
 }
 
@@ -340,7 +338,7 @@ pub enum DepositRequestStatus {
     /// We have a record of the deposit request transaction, and it has
     /// been confirmed on the canonical bitcoin blockchain. We have not
     /// spent these funds. The integer is the height of the block
-    /// confirming the request.
+    /// confirming the deposit request.
     Confirmed(u64),
     /// We have a record of the deposit request being included as an input
     /// in another bitcoin transaction that has been confirmed on the
@@ -358,7 +356,7 @@ pub enum DepositRequestStatus {
     Unconfirmed,
 }
 
-/// A struct for the a status report summary of a deposit request for use
+/// A struct for the status report summary of a deposit request for use
 /// in validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepositRequestReport {
@@ -384,9 +382,9 @@ pub struct DepositRequestReport {
 impl DepositRequestReport {
     fn validate(self, outpoint: OutPoint, chain_tip_height: u64) -> Result<(), BitcoinInputError> {
         let confirmed_block_height = match self.status {
-            // Deposit requests are only writen to the database after they
+            // Deposit requests are only written to the database after they
             // have been confirmed, so this means that we have a record of
-            // the request but it has not been confirmed on the canonical
+            // the request, but it has not been confirmed on the canonical
             // bitcoin blockchain.
             DepositRequestStatus::Unconfirmed => {
                 return Err(BitcoinInputError::DepositTxNotOnBestChain(outpoint));
@@ -404,7 +402,7 @@ impl DepositRequestReport {
 
         match self.can_sign {
             // Although, we have a record for the deposit request, we
-            // haven't voted on it ourselves yet so we do not know if we
+            // haven't voted on it ourselves yet, so we do not know if we
             // can sign for it.
             None => return Err(BitcoinInputError::NoDepositRequestVote(outpoint)),
             // We know that we cannot sign for the deposit because it is
@@ -444,16 +442,16 @@ pub enum WithdrawalRequestConfirmationStatus {
     /// We have no record of the deposit request.
     NoRecord,
     /// We have a record of the withdrawal request event, and it has been
-    /// confirmed on the canonical stacks blockchain. It remains
+    /// confirmed on the canonical Stacks blockchain. It remains
     /// unfulfilled.
     Confirmed,
     /// We have a record of the withdrawal request event, and it has been
-    /// confirmed on the canonical stacks blockchain. It has been
+    /// confirmed on the canonical Stacks blockchain. It has been
     /// fulfilled.
     Fulfilled,
 }
 
-/// A struct for the a status report summary of a deposit request for use
+/// A struct for the status report summary of a withdrawal request for use
 /// in validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WithdrawalRequestReport {

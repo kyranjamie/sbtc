@@ -419,7 +419,7 @@ impl PgStore {
         txid: &model::BitcoinTxId,
         output_index: u32,
     ) -> Result<Option<i64>, Error> {
-        // Before the deposit request is writen a signer also stores the
+        // Before the deposit request is written a signer also stores the
         // bitcoin transaction and (after #731) the bitcoin block
         // confirming the deposit to the database. So this will return zero
         // rows only when we cannot find the deposit request.
@@ -887,7 +887,7 @@ impl super::DbRead for PgStore {
             None => DepositRequestStatus::Unconfirmed,
             // Block heights are taken from u64 fields and converted to
             // i64s before being written to the database, so the conversion
-            // back to a u64 should always be fine.
+            // back to an u64 should always be fine.
             Some(Err(error)) => return Err(Error::ConversionDatabaseInt(error)),
         };
 
