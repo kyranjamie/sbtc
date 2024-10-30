@@ -743,8 +743,8 @@ impl super::DbRead for PgStore {
             "#,
         )
         .bind(i64::try_from(id.request_id).map_err(Error::ConversionDatabaseInt)?)
-        .bind(&id.txid)
-        .bind(&id.block_hash)
+        .bind(id.txid)
+        .bind(id.block_hash)
         .fetch_optional(&self.0)
         .await
         .map_err(Error::SqlxQuery)?;
@@ -754,6 +754,7 @@ impl super::DbRead for PgStore {
             amount: None,
             recipient: None,
             max_fee: None,
+            id: *id,
         })
     }
 
