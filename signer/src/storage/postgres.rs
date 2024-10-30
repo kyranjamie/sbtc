@@ -18,7 +18,7 @@ use stacks_common::types::chainstate::StacksAddress;
 use crate::bitcoin::utxo::SignerUtxo;
 use crate::bitcoin::validation::DepositRequestReport;
 use crate::bitcoin::validation::DepositRequestStatus;
-use crate::bitcoin::validation::WithdrawalRequestConfirmationStatus;
+use crate::bitcoin::validation::WithdrawalRequestStatus;
 use crate::bitcoin::validation::WithdrawalRequestReport;
 use crate::error::Error;
 use crate::keys::PublicKey;
@@ -823,8 +823,8 @@ impl super::DbRead for PgStore {
     async fn get_withdrawal_request(
         &self,
         id: &model::QualifiedRequestId,
-    ) -> Result<WithdrawalRequestReport, Error> {
-        sqlx::query_as::<_, model::WithdrawalRequest>(
+    ) -> Result<Option<WithdrawalRequestReport>, Error> {
+        let request = sqlx::query_as::<_, model::WithdrawalRequest>(
             r#"
             SELECT
                 request_id
@@ -847,13 +847,17 @@ impl super::DbRead for PgStore {
         .await
         .map_err(Error::SqlxQuery)?;
 
-        Ok(WithdrawalRequestReport {
-            status: WithdrawalRequestConfirmationStatus::Confirmed,
-            amount: None,
-            recipient: None,
-            max_fee: None,
+        let Some(request) = request else {
+            return Ok(None);
+        };
+
+        Ok(Some(WithdrawalRequestReport {
+            status: WithdrawalRequestStatus::Confirmed,
+            amount: request.amount,
+            recipient: request.recipient,
+            max_fee: request.max_fee,
             id: *id,
-        })
+        }))
     }
 
     async fn get_accepted_deposit_requests(

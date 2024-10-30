@@ -641,6 +641,7 @@ pub struct QualifiedRequestId {
 
 /// A bitcoin transaction
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct BitcoinTx(bitcoin::Transaction);
 
 impl Deref for BitcoinTx {
@@ -787,6 +788,7 @@ impl From<&BitcoinBlock> for BitcoinBlockRef {
 
 /// The Stacks block ID. This is different from the block header hash.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
 pub struct StacksBlockHash(StacksBlockId);
 
 impl Deref for StacksBlockHash {

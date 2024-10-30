@@ -1,5 +1,7 @@
 //! validation of bitcoin transactions.
 
+use std::ops::Deref as _;
+
 use bitcoin::relative::LockTime;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
@@ -87,12 +89,12 @@ impl BitcoinTxContext {
     {
         let db = ctx.get_storage();
         let Some(signer_txo_input) = self.tx.input.first() else {
-            return Err(BitcoinDepositInputError::InvalidSignerUtxo.into_error(self));
+            return Err(BitcoinSignerInputError::InvalidSignerUtxo.into_error(self));
         };
         let signer_txo_txid = signer_txo_input.previous_output.txid.into();
 
         let Some(signer_tx) = db.get_bitcoin_tx(&signer_txo_txid).await? else {
-            return Err(BitcoinDepositInputError::InvalidSignerUtxo.into_error(self));
+            return Err(BitcoinSignerInputError::InvalidSignerUtxo.into_error(self));
         };
 
         let output_index = signer_txo_input
@@ -106,7 +108,7 @@ impl BitcoinTxContext {
         let script = signer_prevout_utxo.script_pubkey.clone().into();
 
         if !db.is_signer_script_pub_key(&script).await? {
-            return Err(BitcoinDepositInputError::InvalidSignerUtxo.into_error(self));
+            return Err(BitcoinSignerInputError::InvalidSignerUtxo.into_error(self));
         }
 
         Ok(signer_prevout_utxo.value)
@@ -123,13 +125,13 @@ impl BitcoinTxContext {
     {
         let db = ctx.get_storage();
         let Some(signer_txo_output) = self.tx.output.first() else {
-            return Err(BitcoinWithdrawalOutputError::InvalidOpReturnOutput.into_error(self));
+            return Err(BitcoinSignerOutputError::InvalidOpReturnOutput.into_error(self));
         };
 
         let script = signer_txo_output.script_pubkey.clone().into();
 
         if !db.is_signer_script_pub_key(&script).await? {
-            return Err(BitcoinWithdrawalOutputError::InvalidOpReturnOutput.into_error(self));
+            return Err(BitcoinSignerOutputError::InvalidOpReturnOutput.into_error(self));
         }
 
         Ok(())
@@ -180,12 +182,14 @@ impl BitcoinTxContext {
         let db = ctx.get_storage();
 
         if self.tx.output.len() != self.request_ids.len() + 2 {
-            return Err(BitcoinWithdrawalOutputError::UnknownWithdrawalRequest.into_error(self));
+            return Err(BitcoinWithdrawalOutputError::Unknown.into_error(self));
         }
 
         let withdrawal_iter = self.tx.output.iter().skip(2).zip(self.request_ids.iter());
         for (utxo, req_id) in withdrawal_iter {
-            let report = db.get_withdrawal_request(req_id).await?;
+            let Some(report) = db.get_withdrawal_request(req_id).await? else {
+                return Err(BitcoinWithdrawalOutputError::Unknown.into_error(self));
+            };
 
             report.validate(utxo).map_err(|err| err.into_error(self))?;
         }
@@ -206,7 +210,7 @@ pub enum BitcoinSignerInputError {
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
 pub enum BitcoinDepositInputError {
     /// The assessed exceeds the max-fee in the deposit request.
-    #[error("the assessed fee for a deposit would exceed their max-fee, {0}")]
+    #[error("the assessed fee for a deposit would exceed their max-fee; {0}")]
     AssessedFeeTooHigh(OutPoint),
     /// The signer is not part of the signer set that generated the
     /// aggregate public key used to lock the deposit funds.
@@ -216,37 +220,33 @@ pub enum BitcoinDepositInputError {
     /// whether a particular deposit cannot be signed by a particular
     /// signers means that the entire transaction is rejected from that
     /// signer.
-    #[error("the signer is not part of the signing set for the aggregate public key, {0}")]
+    #[error("the signer is not part of the signing set for the aggregate public key; {0}")]
     CannotSignUtxo(OutPoint),
     /// The deposit transaction has been confirmed on a bitcoin block
     /// that is not part of the canonical bitcoin blockchain.
-    #[error("deposit transaction not on canonical bitcoin blockchain, {0}")]
+    #[error("deposit transaction not on canonical bitcoin blockchain; {0}")]
     TxNotOnBestChain(OutPoint),
     /// The deposit UTXO has already been spent.
-    #[error("deposit transaction not on canonical bitcoin blockchain, {0}")]
+    #[error("deposit transaction used as input in another sweep transaction; {0}")]
     DepositUtxoSpent(OutPoint),
-    /// The signers' UTXO is not locked with the latest aggregate public
-    /// key.
-    #[error("signers' UTXO locked with incorrect scriptPubKey")]
-    InvalidSignerUtxo,
     /// Given the current time and block height, it would be imprudent to
     /// attempt to sweep in a deposit request with the given lock-time.
-    #[error("lock-time expiration is too soon, {0}")]
+    #[error("lock-time expiration is too soon; {0}")]
     LockTimeExpiry(OutPoint),
     /// The signer does not have a record of the deposit request in our
     /// database.
-    #[error("the signer does not have a record of the deposit request, {0}")]
+    #[error("the signer does not have a record of the deposit request; {0}")]
     NoVote(OutPoint),
     /// The signer has rejected the deposit request.
-    #[error("the signer has not accepted the deposit request, {0}")]
+    #[error("the signer has not accepted the deposit request; {0}")]
     RejectedRequest(OutPoint),
     /// The signer does not have a record of the deposit request in our
     /// database.
-    #[error("the signer does not have a record of the deposit request, {0}")]
+    #[error("the signer does not have a record of the deposit request; {0}")]
     Unknown(OutPoint),
     /// The signer does not have a record of the deposit request in our
     /// database.
-    #[error("the signer does not have a record of the deposit request, {0}")]
+    #[error("the signer does not have a record of the deposit request; {0}")]
     UnsupportedLockTime(OutPoint),
 }
 
@@ -292,7 +292,7 @@ pub enum BitcoinWithdrawalOutputError {
     RejectedWithdrawalRequest,
     /// One of the output amounts does not match the amount in the withdrawal request.
     #[error("the signer does not have a record of the withdrawal request")]
-    UnknownWithdrawalRequest,
+    Unknown,
 }
 
 /// The responses for validation of a sweep transaction on bitcoin.
@@ -301,6 +301,12 @@ pub enum BitcoinSweepErrorMsg {
     /// The error has something to do with the inputs.
     #[error("the assessed fee for a deposit would exceed their max-fee")]
     Deposit(#[from] BitcoinDepositInputError),
+    /// The error has something to do with the inputs.
+    #[error("the assessed fee for a deposit would exceed their max-fee")]
+    SignerInput(#[from] BitcoinSignerInputError),
+    /// The error has something to do with the inputs.
+    #[error("the assessed fee for a deposit would exceed their max-fee")]
+    SignerOutput(#[from] BitcoinSignerOutputError),
     /// The error has something to do with the outputs.
     #[error("the assessed fee for a withdrawal would exceed their max-fee")]
     Withdrawal(#[from] BitcoinWithdrawalOutputError),
@@ -336,6 +342,24 @@ impl BitcoinDepositInputError {
     fn into_error(self, ctx: &BitcoinTxContext) -> Error {
         Error::BitcoinValidation(Box::new(BitcoinValidationError {
             error: BitcoinSweepErrorMsg::Deposit(self),
+            context: ctx.clone(),
+        }))
+    }
+}
+
+impl BitcoinSignerInputError {
+    fn into_error(self, ctx: &BitcoinTxContext) -> Error {
+        Error::BitcoinValidation(Box::new(BitcoinValidationError {
+            error: BitcoinSweepErrorMsg::SignerInput(self),
+            context: ctx.clone(),
+        }))
+    }
+}
+
+impl BitcoinSignerOutputError {
+    fn into_error(self, ctx: &BitcoinTxContext) -> Error {
+        Error::BitcoinValidation(Box::new(BitcoinValidationError {
+            error: BitcoinSweepErrorMsg::SignerOutput(self),
             context: ctx.clone(),
         }))
     }
@@ -460,9 +484,7 @@ impl DepositRequestReport {
 
 /// An enum for the confirmation status of a deposit request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WithdrawalRequestConfirmationStatus {
-    /// We have no record of the deposit request.
-    NoRecord,
+pub enum WithdrawalRequestStatus {
     /// We have a record of the withdrawal request event, and it has been
     /// confirmed on the canonical Stacks blockchain. It remains
     /// unfulfilled.
@@ -480,39 +502,36 @@ pub struct WithdrawalRequestReport {
     /// The identifier for the withdrawal request
     pub id: QualifiedRequestId,
     /// The confirmation status of the deposit request transaction.
-    pub status: WithdrawalRequestConfirmationStatus,
+    pub status: WithdrawalRequestStatus,
     /// Whether this signer was part of the signing set associated with the
     /// deposited funds. If the signer is not part of the signing set, then
     /// we do not do a check of whether we will accept it otherwise.
     ///
     /// This should only be None if we do not have a record of the deposit
     /// request.
-    pub amount: Option<u64>,
+    pub amount: u64,
     /// Whether this signer accepted the deposit request or not. This
     /// should only be None if we do not have a record of the deposit
     /// request or if we cannot sign for the deposited funds.
-    pub recipient: Option<ScriptPubKey>,
+    pub recipient: ScriptPubKey,
     /// request or if we cannot sign for the deposited funds.
-    pub max_fee: Option<u64>,
+    pub max_fee: u64,
 }
 
 impl WithdrawalRequestReport {
     fn validate(self, utxo: &TxOut) -> Result<(), BitcoinWithdrawalOutputError> {
         match self.status {
-            WithdrawalRequestConfirmationStatus::NoRecord => {
-                return Err(BitcoinWithdrawalOutputError::UnknownWithdrawalRequest);
+            WithdrawalRequestStatus::Fulfilled => {
+                return Err(BitcoinWithdrawalOutputError::Unknown);
             }
-            WithdrawalRequestConfirmationStatus::Fulfilled => {
-                return Err(BitcoinWithdrawalOutputError::UnknownWithdrawalRequest);
-            }
-            WithdrawalRequestConfirmationStatus::Confirmed => (),
+            WithdrawalRequestStatus::Confirmed => (),
         };
 
-        if self.amount != Some(utxo.value.to_sat()) {
+        if self.amount != utxo.value.to_sat() {
             return Err(BitcoinWithdrawalOutputError::IncorrectWithdrawalAmount);
         }
 
-        if self.recipient.as_deref() != Some(&utxo.script_pubkey) {
+        if self.recipient.deref() != &utxo.script_pubkey {
             return Err(BitcoinWithdrawalOutputError::IncorrectWithdrawalRecipient);
         }
 

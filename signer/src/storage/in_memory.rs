@@ -706,7 +706,7 @@ impl super::DbRead for SharedStore {
     async fn get_withdrawal_request(
         &self,
         _id: &model::QualifiedRequestId,
-    ) -> Result<WithdrawalRequestReport, Error> {
+    ) -> Result<Option<WithdrawalRequestReport>, Error> {
         unimplemented!()
     }
 

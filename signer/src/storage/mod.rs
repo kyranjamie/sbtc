@@ -75,7 +75,7 @@ pub trait DbRead {
     ) -> impl Future<Output = Result<Vec<model::DepositRequest>, Error>> + Send;
 
     /// This function returns a deposit request report that does the
-    /// following checks:
+    /// following:
     ///
     /// 1. Check that the current signer accepted by the deposit request.
     /// 2. Check that this signer can contribute a share of the final
@@ -83,7 +83,7 @@ pub trait DbRead {
     /// 3. Check that the deposit transaction is in a block on the bitcoin
     ///    blockchain identified by the following chain tip.
     /// 4. Return the locktime embedded of the reclaim script in the
-    ///    deposit request.
+    ///    deposit request. It does not check of the value.
     ///
     /// Note that when a signer checks whether it would accept the deposit,
     /// it included a check for whether it was part of the signing set
@@ -224,7 +224,7 @@ pub trait DbRead {
     fn get_withdrawal_request(
         &self,
         id: &model::QualifiedRequestId,
-    ) -> impl Future<Output = Result<WithdrawalRequestReport, Error>> + Send;
+    ) -> impl Future<Output = Result<Option<WithdrawalRequestReport>, Error>> + Send;
 
     /// Check that the given block hash is included in the canonical
     /// bitcoin blockchain, where the canonical blockchain is identified by
