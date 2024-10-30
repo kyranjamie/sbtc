@@ -885,9 +885,8 @@ impl super::DbRead for PgStore {
         let status = match summary.block_height.map(u64::try_from) {
             Some(Ok(block_height)) => DepositRequestStatus::Confirmed(block_height),
             None => DepositRequestStatus::Unconfirmed,
-            // Block heights are taken from u64 fields and converted to
-            // i64s before being written to the database, so the conversion
-            // back to an u64 should always be fine.
+            // Block heights are stored as BIGINTs after conversion from
+            // u64s, so converting back to u64s is actually safe.
             Some(Err(error)) => return Err(Error::ConversionDatabaseInt(error)),
         };
 
