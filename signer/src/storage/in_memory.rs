@@ -351,6 +351,7 @@ impl super::DbRead for SharedStore {
             amount: deposit_request.amount,
             lock_time: bitcoin::relative::LockTime::from_consensus(deposit_request.lock_time)
                 .map_err(Error::DisabledLockTime)?,
+            outpoint: bitcoin::OutPoint::new((*txid).into(), output_index),
         }))
     }
 
