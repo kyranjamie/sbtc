@@ -212,8 +212,8 @@ export const contracts = {
     constants: {},
     non_fungible_tokens: [],
     fungible_tokens: [],
-    epoch: "Epoch25",
-    clarity_version: "Clarity2",
+    epoch: "Epoch30",
+    clarity_version: "Clarity3",
     contractName: "sbtc-bootstrap-signers",
   },
   sbtcDeposit: {
@@ -227,6 +227,8 @@ export const contracts = {
             type: {
               tuple: [
                 { name: "amount", type: "uint128" },
+                { name: "burn-hash", type: { buffer: { length: 32 } } },
+                { name: "burn-height", type: "uint128" },
                 { name: "recipient", type: "principal" },
                 { name: "txid", type: { buffer: { length: 32 } } },
                 { name: "vout-index", type: "uint128" },
@@ -244,6 +246,8 @@ export const contracts = {
           deposit: TypedAbiArg<
             {
               amount: number | bigint;
+              burnHash: Uint8Array;
+              burnHeight: number | bigint;
               recipient: string;
               txid: Uint8Array;
               voutIndex: number | bigint;
@@ -265,6 +269,8 @@ export const contracts = {
           { name: "vout-index", type: "uint128" },
           { name: "amount", type: "uint128" },
           { name: "recipient", type: "principal" },
+          { name: "burn-hash", type: { buffer: { length: 32 } } },
+          { name: "burn-height", type: "uint128" },
         ],
         outputs: {
           type: {
@@ -280,6 +286,8 @@ export const contracts = {
           voutIndex: TypedAbiArg<number | bigint, "voutIndex">,
           amount: TypedAbiArg<number | bigint, "amount">,
           recipient: TypedAbiArg<string, "recipient">,
+          burnHash: TypedAbiArg<Uint8Array, "burnHash">,
+          burnHeight: TypedAbiArg<number | bigint, "burnHeight">,
         ],
         Response<Response<boolean, bigint>, bigint>
       >,
@@ -294,6 +302,8 @@ export const contracts = {
                 type: {
                   tuple: [
                     { name: "amount", type: "uint128" },
+                    { name: "burn-hash", type: { buffer: { length: 32 } } },
+                    { name: "burn-height", type: "uint128" },
                     { name: "recipient", type: "principal" },
                     { name: "txid", type: { buffer: { length: 32 } } },
                     { name: "vout-index", type: "uint128" },
@@ -310,6 +320,8 @@ export const contracts = {
           deposits: TypedAbiArg<
             {
               amount: number | bigint;
+              burnHash: Uint8Array;
+              burnHeight: number | bigint;
               recipient: string;
               txid: Uint8Array;
               voutIndex: number | bigint;
@@ -318,6 +330,15 @@ export const contracts = {
           >,
         ],
         Response<bigint, bigint>
+      >,
+      getBurnHeader: {
+        name: "get-burn-header",
+        access: "read_only",
+        args: [{ name: "height", type: "uint128" }],
+        outputs: { type: { optional: { buffer: { length: 32 } } } },
+      } as TypedAbiFunction<
+        [height: TypedAbiArg<number | bigint, "height">],
+        Uint8Array | null
       >,
     },
     maps: {},
@@ -339,6 +360,16 @@ export const contracts = {
       } as TypedAbiVariable<bigint>,
       ERR_DEPOSIT_REPLAY: {
         name: "ERR_DEPOSIT_REPLAY",
+        type: {
+          response: {
+            ok: "none",
+            error: "uint128",
+          },
+        },
+        access: "constant",
+      } as TypedAbiVariable<Response<null, bigint>>,
+      ERR_INVALID_BURN_HASH: {
+        name: "ERR_INVALID_BURN_HASH",
         type: {
           response: {
             ok: "none",
@@ -388,11 +419,39 @@ export const contracts = {
         access: "constant",
       } as TypedAbiVariable<bigint>,
     },
-    constants: {},
+    constants: {
+      ERR_DEPOSIT: {
+        isOk: false,
+        value: 303n,
+      },
+      ERR_DEPOSIT_INDEX_PREFIX: 303n,
+      ERR_DEPOSIT_REPLAY: {
+        isOk: false,
+        value: 301n,
+      },
+      ERR_INVALID_BURN_HASH: {
+        isOk: false,
+        value: 305n,
+      },
+      ERR_INVALID_CALLER: {
+        isOk: false,
+        value: 304n,
+      },
+      ERR_LOWER_THAN_DUST: {
+        isOk: false,
+        value: 302n,
+      },
+      ERR_TXID_LEN: {
+        isOk: false,
+        value: 300n,
+      },
+      dustLimit: 546n,
+      txidLength: 32n,
+    },
     non_fungible_tokens: [],
     fungible_tokens: [],
-    epoch: "Epoch25",
-    clarity_version: "Clarity2",
+    epoch: "Epoch30",
+    clarity_version: "Clarity3",
     contractName: "sbtc-deposit",
   },
   sbtcRegistry: {
@@ -411,6 +470,8 @@ export const contracts = {
           { name: "vout-index", type: "uint128" },
           { name: "amount", type: "uint128" },
           { name: "recipient", type: "principal" },
+          { name: "burn-hash", type: { buffer: { length: 32 } } },
+          { name: "burn-height", type: "uint128" },
         ],
         outputs: { type: { response: { ok: "bool", error: "uint128" } } },
       } as TypedAbiFunction<
@@ -419,6 +480,8 @@ export const contracts = {
           voutIndex: TypedAbiArg<number | bigint, "voutIndex">,
           amount: TypedAbiArg<number | bigint, "amount">,
           recipient: TypedAbiArg<string, "recipient">,
+          burnHash: TypedAbiArg<Uint8Array, "burnHash">,
+          burnHeight: TypedAbiArg<number | bigint, "burnHeight">,
         ],
         Response<boolean, bigint>
       >,
@@ -431,6 +494,8 @@ export const contracts = {
           { name: "output-index", type: "uint128" },
           { name: "signer-bitmap", type: "uint128" },
           { name: "fee", type: "uint128" },
+          { name: "burn-hash", type: { buffer: { length: 32 } } },
+          { name: "burn-height", type: "uint128" },
         ],
         outputs: { type: { response: { ok: "bool", error: "uint128" } } },
       } as TypedAbiFunction<
@@ -440,6 +505,8 @@ export const contracts = {
           outputIndex: TypedAbiArg<number | bigint, "outputIndex">,
           signerBitmap: TypedAbiArg<number | bigint, "signerBitmap">,
           fee: TypedAbiArg<number | bigint, "fee">,
+          burnHash: TypedAbiArg<Uint8Array, "burnHash">,
+          burnHeight: TypedAbiArg<number | bigint, "burnHeight">,
         ],
         Response<boolean, bigint>
       >,
@@ -814,8 +881,8 @@ export const contracts = {
     constants: {},
     non_fungible_tokens: [],
     fungible_tokens: [],
-    epoch: "Epoch25",
-    clarity_version: "Clarity2",
+    epoch: "Epoch30",
+    clarity_version: "Clarity3",
     contractName: "sbtc-registry",
   },
   sbtcToken: {
@@ -1169,8 +1236,8 @@ export const contracts = {
     constants: {},
     non_fungible_tokens: [],
     fungible_tokens: [{ name: "sbtc-token" }, { name: "sbtc-token-locked" }],
-    epoch: "Epoch25",
-    clarity_version: "Clarity2",
+    epoch: "Epoch30",
+    clarity_version: "Clarity3",
     contractName: "sbtc-token",
   },
   sbtcWithdrawal: {
@@ -1187,6 +1254,8 @@ export const contracts = {
                   name: "bitcoin-txid",
                   type: { optional: { buffer: { length: 32 } } },
                 },
+                { name: "burn-hash", type: { buffer: { length: 32 } } },
+                { name: "burn-height", type: "uint128" },
                 { name: "fee", type: { optional: "uint128" } },
                 { name: "output-index", type: { optional: "uint128" } },
                 { name: "request-id", type: "uint128" },
@@ -1206,6 +1275,8 @@ export const contracts = {
           withdrawal: TypedAbiArg<
             {
               bitcoinTxid: Uint8Array | null;
+              burnHash: Uint8Array;
+              burnHeight: number | bigint;
               fee: number | bigint | null;
               outputIndex: number | bigint | null;
               requestId: number | bigint;
@@ -1230,6 +1301,8 @@ export const contracts = {
           { name: "signer-bitmap", type: "uint128" },
           { name: "output-index", type: "uint128" },
           { name: "fee", type: "uint128" },
+          { name: "burn-hash", type: { buffer: { length: 32 } } },
+          { name: "burn-height", type: "uint128" },
         ],
         outputs: { type: { response: { ok: "bool", error: "uint128" } } },
       } as TypedAbiFunction<
@@ -1239,6 +1312,8 @@ export const contracts = {
           signerBitmap: TypedAbiArg<number | bigint, "signerBitmap">,
           outputIndex: TypedAbiArg<number | bigint, "outputIndex">,
           fee: TypedAbiArg<number | bigint, "fee">,
+          burnHash: TypedAbiArg<Uint8Array, "burnHash">,
+          burnHeight: TypedAbiArg<number | bigint, "burnHeight">,
         ],
         Response<boolean, bigint>
       >,
@@ -1256,6 +1331,8 @@ export const contracts = {
                       name: "bitcoin-txid",
                       type: { optional: { buffer: { length: 32 } } },
                     },
+                    { name: "burn-hash", type: { buffer: { length: 32 } } },
+                    { name: "burn-height", type: "uint128" },
                     { name: "fee", type: { optional: "uint128" } },
                     { name: "output-index", type: { optional: "uint128" } },
                     { name: "request-id", type: "uint128" },
@@ -1274,6 +1351,8 @@ export const contracts = {
           withdrawals: TypedAbiArg<
             {
               bitcoinTxid: Uint8Array | null;
+              burnHash: Uint8Array;
+              burnHeight: number | bigint;
               fee: number | bigint | null;
               outputIndex: number | bigint | null;
               requestId: number | bigint;
@@ -1330,6 +1409,15 @@ export const contracts = {
           signerBitmap: TypedAbiArg<number | bigint, "signerBitmap">,
         ],
         Response<boolean, bigint>
+      >,
+      getBurnHeader: {
+        name: "get-burn-header",
+        access: "read_only",
+        args: [{ name: "height", type: "uint128" }],
+        outputs: { type: { optional: { buffer: { length: 32 } } } },
+      } as TypedAbiFunction<
+        [height: TypedAbiArg<number | bigint, "height">],
+        Uint8Array | null
       >,
       validateRecipient: {
         name: "validate-recipient",
@@ -1416,6 +1504,16 @@ export const contracts = {
         },
         access: "constant",
       } as TypedAbiVariable<Response<null, bigint>>,
+      ERR_INVALID_BURN_HASH: {
+        name: "ERR_INVALID_BURN_HASH",
+        type: {
+          response: {
+            ok: "none",
+            error: "uint128",
+          },
+        },
+        access: "constant",
+      } as TypedAbiVariable<Response<null, bigint>>,
       ERR_INVALID_CALLER: {
         name: "ERR_INVALID_CALLER",
         type: {
@@ -1467,11 +1565,53 @@ export const contracts = {
         access: "constant",
       } as TypedAbiVariable<bigint>,
     },
-    constants: {},
+    constants: {
+      DUST_LIMIT: 546n,
+      ERR_ALREADY_PROCESSED: {
+        isOk: false,
+        value: 505n,
+      },
+      ERR_DUST_LIMIT: {
+        isOk: false,
+        value: 502n,
+      },
+      ERR_FEE_TOO_HIGH: {
+        isOk: false,
+        value: 506n,
+      },
+      ERR_INVALID_ADDR_HASHBYTES: {
+        isOk: false,
+        value: 501n,
+      },
+      ERR_INVALID_ADDR_VERSION: {
+        isOk: false,
+        value: 500n,
+      },
+      ERR_INVALID_BURN_HASH: {
+        isOk: false,
+        value: 508n,
+      },
+      ERR_INVALID_CALLER: {
+        isOk: false,
+        value: 504n,
+      },
+      ERR_INVALID_REQUEST: {
+        isOk: false,
+        value: 503n,
+      },
+      ERR_WITHDRAWAL_INDEX: {
+        isOk: false,
+        value: 507n,
+      },
+      ERR_WITHDRAWAL_INDEX_PREFIX: 507n,
+      MAX_ADDRESS_VERSION: 6n,
+      mAX_ADDRESS_VERSION_BUFF_20: 4n,
+      mAX_ADDRESS_VERSION_BUFF_32: 6n,
+    },
     non_fungible_tokens: [],
     fungible_tokens: [],
-    epoch: "Epoch25",
-    clarity_version: "Clarity2",
+    epoch: "Epoch30",
+    clarity_version: "Clarity3",
     contractName: "sbtc-withdrawal",
   },
 } as const;
