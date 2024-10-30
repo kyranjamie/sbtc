@@ -113,7 +113,7 @@ impl BitcoinTxContext {
     }
 
     /// Validate the signer outputs.
-    /// 
+    ///
     /// Each sweep transaction has two signer outputs, the new UTXO with
     /// all of the signers' funds and an `OP_RETURN` TXO. This function
     /// validates both of them.
@@ -187,9 +187,7 @@ impl BitcoinTxContext {
         for (utxo, req_id) in withdrawal_iter {
             let report = db.get_withdrawal_request(req_id).await?;
 
-            report
-                .validate(utxo)
-                .map_err(|err| err.into_error(self))?;
+            report.validate(utxo).map_err(|err| err.into_error(self))?;
         }
         Ok(())
     }
@@ -219,11 +217,11 @@ pub enum BitcoinDepositInputError {
     /// signers means that the entire transaction is rejected from that
     /// signer.
     #[error("the signer is not part of the signing set for the aggregate public key, {0}")]
-    CannotSignPublicKey(OutPoint),
+    CannotSignUtxo(OutPoint),
     /// The deposit transaction has been confirmed on a bitcoin block
     /// that is not part of the canonical bitcoin blockchain.
     #[error("deposit transaction not on canonical bitcoin blockchain, {0}")]
-    DepositTxNotOnBestChain(OutPoint),
+    TxNotOnBestChain(OutPoint),
     /// The deposit UTXO has already been spent.
     #[error("deposit transaction not on canonical bitcoin blockchain, {0}")]
     DepositUtxoSpent(OutPoint),
@@ -234,7 +232,7 @@ pub enum BitcoinDepositInputError {
     /// Given the current time and block height, it would be imprudent to
     /// attempt to sweep in a deposit request with the given lock-time.
     #[error("lock-time expiration is too soon, {0}")]
-    LockTimeExpirationTooSoon(OutPoint),
+    LockTimeExpiry(OutPoint),
     /// The signer does not have a record of the deposit request in our
     /// database.
     #[error("the signer does not have a record of the deposit request, {0}")]
@@ -249,7 +247,7 @@ pub enum BitcoinDepositInputError {
     /// The signer does not have a record of the deposit request in our
     /// database.
     #[error("the signer does not have a record of the deposit request, {0}")]
-    UnknownSupportedLockTime(OutPoint),
+    UnsupportedLockTime(OutPoint),
 }
 
 /// The responses for validation of a sweep transaction on bitcoin.
@@ -409,7 +407,7 @@ impl DepositRequestReport {
             // the request, but it has not been confirmed on the canonical
             // bitcoin blockchain.
             DepositRequestStatus::Unconfirmed => {
-                return Err(BitcoinDepositInputError::DepositTxNotOnBestChain(self.outpoint));
+                return Err(BitcoinDepositInputError::TxNotOnBestChain(self.outpoint));
             }
             // This means that we have a record of the deposit UTXO being
             // spent in a sweep transaction that has been confirmed on the
@@ -430,7 +428,7 @@ impl DepositRequestReport {
             // We know that we cannot sign for the deposit because it is
             // locked with a public key where the current signer is not
             // part of the signing set.
-            Some(false) => return Err(BitcoinDepositInputError::CannotSignPublicKey(self.outpoint)),
+            Some(false) => return Err(BitcoinDepositInputError::CannotSignUtxo(self.outpoint)),
             // Yay.
             Some(true) => (),
         }
@@ -448,11 +446,11 @@ impl DepositRequestReport {
             LockTime::Blocks(height) => {
                 let max_age = height.value().saturating_sub(DEPOSIT_LOCKTIME_BLOCK_BUFFER) as u64;
                 if deposit_age >= max_age {
-                    return Err(BitcoinDepositInputError::LockTimeExpirationTooSoon(self.outpoint));
+                    return Err(BitcoinDepositInputError::LockTimeExpiry(self.outpoint));
                 }
             }
             LockTime::Time(_) => {
-                return Err(BitcoinDepositInputError::UnknownSupportedLockTime(self.outpoint))
+                return Err(BitcoinDepositInputError::UnsupportedLockTime(self.outpoint))
             }
         }
 
@@ -544,7 +542,7 @@ mod tests {
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::DepositTxNotOnBestChain(OutPoint::null())),
+        error: Some(BitcoinDepositInputError::TxNotOnBestChain(OutPoint::null())),
         chain_tip_height: 2,
     } ; "deposit-reorged")]
     #[test_case(DepositReportErrorMapping {
@@ -580,7 +578,7 @@ mod tests {
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::CannotSignPublicKey(OutPoint::null())),
+        error: Some(BitcoinDepositInputError::CannotSignUtxo(OutPoint::null())),
         chain_tip_height: 2,
     } ; "cannot-sign-for-deposit")]
     #[test_case(DepositReportErrorMapping {
@@ -604,7 +602,7 @@ mod tests {
             lock_time: LockTime::from_height(DEPOSIT_LOCKTIME_BLOCK_BUFFER + 1),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::LockTimeExpirationTooSoon(OutPoint::null())),
+        error: Some(BitcoinDepositInputError::LockTimeExpiry(OutPoint::null())),
         chain_tip_height: 2,
     } ; "lock-time-expires-soon-1")]
     #[test_case(DepositReportErrorMapping {
@@ -616,7 +614,7 @@ mod tests {
             lock_time: LockTime::from_height(DEPOSIT_LOCKTIME_BLOCK_BUFFER + 2),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::LockTimeExpirationTooSoon(OutPoint::null())),
+        error: Some(BitcoinDepositInputError::LockTimeExpiry(OutPoint::null())),
         chain_tip_height: 2,
     } ; "lock-time-expires-soon-2")]
     #[test_case(DepositReportErrorMapping {
@@ -628,7 +626,7 @@ mod tests {
             lock_time: LockTime::from_512_second_intervals(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::UnknownSupportedLockTime(OutPoint::null())),
+        error: Some(BitcoinDepositInputError::UnsupportedLockTime(OutPoint::null())),
         chain_tip_height: 2,
     } ; "lock-time-in-time-units-2")]
     #[test_case(DepositReportErrorMapping {
