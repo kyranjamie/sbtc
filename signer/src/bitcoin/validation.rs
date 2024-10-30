@@ -2,6 +2,7 @@
 
 // use std::ops::Deref;
 
+use bitcoin::relative::LockTime;
 use bitcoin::Amount;
 use bitcoin::OutPoint;
 use bitcoin::TxOut;
@@ -14,6 +15,7 @@ use crate::storage::model::BitcoinTx;
 use crate::storage::model::QualifiedRequestId;
 use crate::storage::model::ScriptPubKey;
 use crate::storage::DbRead;
+use crate::DEPOSIT_LOCKTIME_BLOCK_BUFFER;
 
 /// The necessary information for validating a bitcoin transaction.
 #[derive(Debug, Clone)]
@@ -144,7 +146,8 @@ impl BitcoinTxContext {
         let mut deposit_amount = 0;
 
         for tx_in in self.tx.input.iter().skip(1) {
-            let txid = tx_in.previous_output.txid.into();
+            let outpoint = tx_in.previous_output;
+            let txid = outpoint.txid.into();
             let report_future = db.get_deposit_request_report(
                 &self.chain_tip,
                 &txid,
@@ -153,13 +156,13 @@ impl BitcoinTxContext {
             );
 
             let Some(report) = report_future.await? else {
-                return Err(BitcoinInputError::UnknownDepositRequest.into_error(self));
+                return Err(BitcoinInputError::UnknownDepositRequest(outpoint).into_error(self));
             };
 
             deposit_amount += report.amount;
 
             report
-                .validate(tx_in.previous_output)
+                .validate(outpoint, self.chain_tip_height)
                 .map_err(|err| err.into_error(self))?;
         }
 
@@ -193,8 +196,8 @@ impl BitcoinTxContext {
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
 pub enum BitcoinInputError {
     ///
-    #[error("the assessed fee for a deposit would exceed their max-fee")]
-    AssessedDepositFeeTooHigh,
+    #[error("the assessed fee for a deposit would exceed their max-fee, {0}")]
+    AssessedDepositFeeTooHigh(OutPoint),
     /// The signer is not part of the signer set that generated the
     /// aggregate public key used to lock the deposit funds.
     ///
@@ -203,34 +206,38 @@ pub enum BitcoinInputError {
     /// whether a particular deposit cannot be signed by a particular
     /// signers means that the entire transaction is rejected from that
     /// signer.
-    #[error("the signer is not part of the signing set for the aggregate public key")]
-    CannotSignDepositRequest,
+    #[error("the signer is not part of the signing set for the aggregate public key, {0}")]
+    CannotSignDepositRequest(OutPoint),
     /// The deposit transaction has been been confirmed on a bitcoin block
     /// that is not part of the canonical bitcoin blockchain.
-    #[error("deposit transaction not on canonical bitcoin blockchain")]
-    DepositTxReorged,
+    #[error("deposit transaction not on canonical bitcoin blockchain, {0}")]
+    DepositTxNotOnBestChain(OutPoint),
     ///
-    #[error("deposit transaction not on canonical bitcoin blockchain")]
-    DepositUtxoSpent,
+    #[error("deposit transaction not on canonical bitcoin blockchain, {0}")]
+    DepositUtxoSpent(OutPoint),
     /// The signers' UTXO is not locked with the latest aggregate public
     /// key.
     #[error("signers' UTXO locked with incorrect scriptPubKey")]
     InvalidSignerUtxo,
     /// Given the current time and block height, it would be imprudent to
     /// attempt to sweep in a deposit request with the given lock-time.
-    #[error("lock-time expiration is too soon")]
-    LockTimeExpirationTooSoon,
+    #[error("lock-time expiration is too soon, {0}")]
+    LockTimeExpirationTooSoon(OutPoint),
     /// The signer does not have a record of the deposit request in our
     /// database.
-    #[error("the signer does not have a record of the deposit request")]
-    NoDepositRequestVote,
+    #[error("the signer does not have a record of the deposit request, {0}")]
+    NoDepositRequestVote(OutPoint),
     /// The signer has rejected the deposit request.
-    #[error("the signer has not accepted the deposit request")]
-    RejectedDepositRequest,
+    #[error("the signer has not accepted the deposit request, {0}")]
+    RejectedDepositRequest(OutPoint),
     /// The signer does not have a record of the deposit request in our
     /// database.
-    #[error("the signer does not have a record of the deposit request")]
-    UnknownDepositRequest,
+    #[error("the signer does not have a record of the deposit request, {0}")]
+    UnknownDepositRequest(OutPoint),
+    /// The signer does not have a record of the deposit request in our
+    /// database.
+    #[error("the signer does not have a record of the deposit request, {0}")]
+    UnknownSupportedLockTime(OutPoint),
 }
 
 /// The responses for validation of a sweep transaction on bitcoin.
@@ -329,11 +336,12 @@ impl BitcoinOutputError {
 
 /// An enum for the confirmation status of a deposit request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DepositRequestConfirmationStatus {
+pub enum DepositRequestStatus {
     /// We have a record of the deposit request transaction, and it has
     /// been confirmed on the canonical bitcoin blockchain. We have not
-    /// spent these funds.
-    Confirmed,
+    /// spent these funds. The integer is the height of the block
+    /// confirming the request.
+    Confirmed(u64),
     /// We have a record of the deposit request being included as an input
     /// in another bitcoin transaction that has been confirmed on the
     /// canonical bitcoin blockchain.
@@ -355,46 +363,75 @@ pub enum DepositRequestConfirmationStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DepositRequestReport {
     /// The confirmation status of the deposit request transaction.
-    pub status: DepositRequestConfirmationStatus,
+    pub status: DepositRequestStatus,
     /// Whether this signer was part of the signing set associated with the
     /// deposited funds. If the signer is not part of the signing set, then
     /// we do not do a check of whether we will accept it otherwise.
     ///
-    /// This should only be None if we do not have a record of the deposit
+    /// This will only be `None` if we do not have a record of the deposit
     /// request.
     pub can_sign: Option<bool>,
     /// Whether this signer accepted the deposit request or not. This
-    /// should only be None if we do not have a record of the deposit
+    /// should only be `None` if we do not have a record of the deposit
     /// request or if we cannot sign for the deposited funds.
     pub is_accepted: Option<bool>,
     /// The deposit amount
     pub amount: u64,
     /// The lock_time in the reclaim script
-    pub lock_time: bitcoin::relative::LockTime,
+    pub lock_time: LockTime,
 }
 
 impl DepositRequestReport {
-    fn validate(self, _: OutPoint) -> Result<(), BitcoinInputError> {
-        match self.status {
-            DepositRequestConfirmationStatus::Unconfirmed => {
-                return Err(BitcoinInputError::DepositTxReorged);
+    fn validate(self, outpoint: OutPoint, chain_tip_height: u64) -> Result<(), BitcoinInputError> {
+        let confirmed_block_height = match self.status {
+            // Deposit requests are only writen to the database after they
+            // have been confirmed, so this means that we have a record of
+            // the request but it has not been confirmed on the canonical
+            // bitcoin blockchain.
+            DepositRequestStatus::Unconfirmed => {
+                return Err(BitcoinInputError::DepositTxNotOnBestChain(outpoint));
             }
-            DepositRequestConfirmationStatus::Spent => {
-                return Err(BitcoinInputError::DepositUtxoSpent);
+            // This means that we have a record of the deposit UTXO being
+            // spent in a sweep transaction that has been confirmed on the
+            // canonical bitcoin blockchain.
+            DepositRequestStatus::Spent => {
+                return Err(BitcoinInputError::DepositUtxoSpent(outpoint));
             }
-            DepositRequestConfirmationStatus::Confirmed => (),
+            // The deposit has been confirmed on the canonical bitcoin
+            // blockchain and remains unspent by us.
+            DepositRequestStatus::Confirmed(block_height) => block_height,
         };
 
-        if self.can_sign.is_none() {
-            return Err(BitcoinInputError::NoDepositRequestVote);
+        match self.can_sign {
+            // Although, we have a record for the deposit request, we
+            // haven't voted on it ourselves yet so we do not know if we
+            // can sign for it.
+            None => return Err(BitcoinInputError::NoDepositRequestVote(outpoint)),
+            // We know that we cannot sign for the deposit because it is
+            // locked with a public key where the current signer is not
+            // part of the signing set.
+            Some(false) => return Err(BitcoinInputError::CannotSignDepositRequest(outpoint)),
+            // Yay.
+            Some(true) => (),
         }
-
-        if self.can_sign != Some(true) {
-            return Err(BitcoinInputError::CannotSignDepositRequest);
-        }
-
+        // If we are here then can_sign is Some(true) so is_accepted is
+        // Some(_). Let's check whether we rejected this deposit.
         if self.is_accepted != Some(true) {
-            return Err(BitcoinInputError::RejectedDepositRequest);
+            return Err(BitcoinInputError::RejectedDepositRequest(outpoint));
+        }
+
+        // We only sweep a deposit if the depositor cannot reclaim the
+        // deposit within the next DEPOSIT_LOCKTIME_BLOCK_BUFFER blocks.
+        let deposit_age = chain_tip_height.saturating_sub(confirmed_block_height);
+
+        match self.lock_time {
+            LockTime::Blocks(height) => {
+                let max_age = height.value().saturating_sub(DEPOSIT_LOCKTIME_BLOCK_BUFFER) as u64;
+                if deposit_age >= max_age {
+                    return Err(BitcoinInputError::LockTimeExpirationTooSoon(outpoint));
+                }
+            }
+            LockTime::Time(_) => return Err(BitcoinInputError::UnknownSupportedLockTime(outpoint)),
         }
 
         Ok(())

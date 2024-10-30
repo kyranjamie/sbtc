@@ -14,8 +14,8 @@ use sqlx::PgExecutor;
 use stacks_common::types::chainstate::StacksAddress;
 
 use crate::bitcoin::utxo::SignerUtxo;
-use crate::bitcoin::validation::DepositRequestConfirmationStatus;
 use crate::bitcoin::validation::DepositRequestReport;
+use crate::bitcoin::validation::DepositRequestStatus;
 use crate::bitcoin::validation::WithdrawalRequestConfirmationStatus;
 use crate::bitcoin::validation::WithdrawalRequestReport;
 use crate::error::Error;
@@ -409,20 +409,20 @@ impl PgStore {
     /// Return the least height for which the deposit request was confirmed
     /// on a bitcoin blockchain.
     ///
-    /// Transactions can be confirmed more than once and this function
-    /// returns the least height out of all bitcoin blocks for which the
-    /// deposit has been confirmed.
+    /// Transactions can be confirmed on more than one blockchain and this
+    /// function returns the least height out of all bitcoin blocks for
+    /// which the deposit has been confirmed.
     ///
-    /// None is returned if we do not have a record of the deposit request,
-    /// or we somehow do not have a record for the deposit transaction.
+    /// None is returned if we do not have a record of the deposit request.
     pub async fn get_deposit_request_least_height(
         &self,
         txid: &model::BitcoinTxId,
         output_index: u32,
     ) -> Result<Option<i64>, Error> {
-        // This will return zero rows when we cannot fund the deposit
-        // request because of the foreign key constraints on the
-        // deposit_requests table.
+        // Before the deposit request is writen a signer also stores the
+        // bitcoin transaction and (after #731) the bitcoin block
+        // confirming the deposit to the database. So this will return zero
+        // rows only when we cannot find the deposit request.
         sqlx::query_scalar::<_, i64>(
             r#"
             SELECT block_height
@@ -800,19 +800,19 @@ impl super::DbRead for PgStore {
         // recursive part of the subsequent query.
         let min_height_fut = self.get_deposit_request_least_height(txid, output_index);
         // None is only returned if we do not have a record of the deposit
-        // request.
+        // request or the deposit transaction.
         let Some(min_block_height) = min_height_fut.await? else {
             return Ok(None);
         };
 
-        #[derive(Debug, sqlx::FromRow)]
+        #[derive(sqlx::FromRow)]
         struct StatusSummary {
             // The current signer may not have a record of their vote for
-            // the deposit. In this case the `is_accepted` and `can_sign`
-            // fields will be None.
+            // the deposit. When that happens the `is_accepted` and
+            // `can_sign` fields will be None.
             is_accepted: Option<bool>,
             can_sign: Option<bool>,
-            is_confirmed: bool,
+            block_height: Option<i64>,
             #[sqlx(try_from = "i64")]
             lock_time: u32,
             #[sqlx(try_from = "i64")]
@@ -829,6 +829,9 @@ impl super::DbRead for PgStore {
         // Note that because of the above query and early exit, we know
         // that we have a record of the deposit request, so this query will
         // return exactly one row.
+        //
+        // TODO: We do not do a check for whether the deposit has been
+        // spent already, for that we need #585.
         let summary = sqlx::query_as::<_, StatusSummary>(
             r#"
                 WITH RECURSIVE block_chain AS (
@@ -856,7 +859,7 @@ impl super::DbRead for PgStore {
                   , ds.can_sign
                   , dr.amount
                   , dr.lock_time
-                  , bc.block_hash IS NOT NULL AS is_confirmed
+                  , bc.block_height
                 FROM sbtc_signer.deposit_requests AS dr 
                 JOIN sbtc_signer.bitcoin_transactions USING (txid)
                 JOIN sbtc_signer.bitcoin_blocks USING (block_hash)
@@ -879,10 +882,13 @@ impl super::DbRead for PgStore {
         .await
         .map_err(Error::SqlxQuery)?;
 
-        let status = if summary.is_confirmed {
-            DepositRequestConfirmationStatus::Confirmed
-        } else {
-            DepositRequestConfirmationStatus::Unconfirmed
+        let status = match summary.block_height.map(u64::try_from) {
+            Some(Ok(block_height)) => DepositRequestStatus::Confirmed(block_height),
+            None => DepositRequestStatus::Unconfirmed,
+            // Block heights are taken from u64 fields and converted to
+            // i64s before being written to the database, so the conversion
+            // back to a u64 should always be fine.
+            Some(Err(error)) => return Err(Error::ConversionDatabaseInt(error)),
         };
 
         Ok(Some(DepositRequestReport {

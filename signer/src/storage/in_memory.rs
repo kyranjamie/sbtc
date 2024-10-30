@@ -12,8 +12,8 @@ use time::OffsetDateTime;
 use tokio::sync::Mutex;
 
 use crate::bitcoin::utxo::SignerUtxo;
-use crate::bitcoin::validation::DepositRequestConfirmationStatus;
 use crate::bitcoin::validation::DepositRequestReport;
+use crate::bitcoin::validation::DepositRequestStatus;
 use crate::bitcoin::validation::WithdrawalRequestReport;
 use crate::error::Error;
 use crate::keys::PublicKey;
@@ -318,10 +318,25 @@ impl super::DbRead for SharedStore {
             .await?
             .into_iter()
             .find(|x| &x.txid == txid && x.output_index == output_index);
-        let status = if pending_deposit_request.is_none() {
-            DepositRequestConfirmationStatus::Unconfirmed
-        } else {
-            DepositRequestConfirmationStatus::Confirmed
+        let status = match pending_deposit_request {
+            None => DepositRequestStatus::Unconfirmed,
+            Some(req) => {
+                let store = self.lock().await;
+                let Some(block_hashes) = store
+                    .bitcoin_transactions_to_blocks
+                    .get(&req.txid)
+                    .and_then(|hashes| hashes.first())
+                else {
+                    return Ok(None);
+                };
+
+                let block_height = store
+                    .bitcoin_blocks
+                    .get(block_hashes)
+                    .map_or(0, |block| block.block_height);
+
+                DepositRequestStatus::Confirmed(block_height)
+            }
         };
         let signer_vote = self
             .get_deposit_signers(txid, output_index)
