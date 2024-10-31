@@ -117,6 +117,10 @@ struct StatusSummary {
     /// The amount associated with the deposit UTXO in sats.
     #[sqlx(try_from = "i64")]
     amount: u64,
+    /// The maximum amount to spend as the bitcoin miner fee when sweeping
+    /// in the funuds.
+    #[sqlx(try_from = "i64")]
+    max_fee: u64,
 }
 
 /// A wrapper around a [`sqlx::PgPool`] which implements
@@ -565,6 +569,7 @@ impl PgStore {
                 ds.is_accepted
               , ds.can_sign
               , dr.amount
+              , dr.max_fee
               , dr.lock_time
               , bc.block_height
               , bc.block_hash
@@ -1057,6 +1062,7 @@ impl super::DbRead for PgStore {
             can_sign: summary.can_sign,
             is_accepted: summary.is_accepted,
             amount: summary.amount,
+            max_fee: summary.max_fee,
             lock_time: bitcoin::relative::LockTime::from_consensus(summary.lock_time)
                 .map_err(Error::DisabledLockTime)?,
             outpoint: bitcoin::OutPoint::new((*txid).into(), output_index),

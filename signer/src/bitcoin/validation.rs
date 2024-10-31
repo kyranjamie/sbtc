@@ -11,6 +11,7 @@ use crate::storage::model::BitcoinBlockHash;
 use crate::storage::model::BitcoinTx;
 use crate::storage::model::BitcoinTxId;
 use crate::storage::model::QualifiedRequestId;
+use crate::storage::DbRead as _;
 use crate::DEPOSIT_LOCKTIME_BLOCK_BUFFER;
 
 /// The necessary information for validating a bitcoin transaction.
@@ -91,11 +92,39 @@ impl BitcoinTxContext {
 
     /// Validate each of the prevouts that coorespond to deposits. This
     /// should be every input except for the first one.
-    async fn validate_deposits<C>(&self, _ctx: &C) -> Result<Amount, Error>
+    async fn validate_deposits<C>(&self, ctx: &C) -> Result<Amount, Error>
     where
         C: Context + Send + Sync,
     {
-        unimplemented!()
+        let db = ctx.get_storage();
+        let signer_public_key = PublicKey::from_private_key(&ctx.config().signer.private_key);
+
+        let mut deposit_amount = 0;
+
+        for tx_in in self.tx.input.iter().skip(1) {
+            let outpoint = tx_in.previous_output;
+            let txid = outpoint.txid.into();
+            let report_future = db.get_deposit_request_report(
+                &self.chain_tip,
+                &txid,
+                outpoint.vout,
+                &signer_public_key,
+            );
+
+            // The DbRead::get_deposit_request_report only returns Ok(None)
+            // if there isn't a record of the deposit request.
+            let Some(report) = report_future.await? else {
+                return Err(BitcoinDepositPrevoutError::Unknown(outpoint).into_error(self));
+            };
+
+            deposit_amount += report.amount;
+
+            report
+                .validate(self.chain_tip_height)
+                .map_err(|err| err.into_error(self))?;
+        }
+
+        Ok(Amount::from_sat(deposit_amount))
     }
 
     /// Validate the withdrawal UTXOs
@@ -109,7 +138,7 @@ impl BitcoinTxContext {
 
 /// The responses for validation of a sweep transaction on bitcoin.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
-pub enum BitcoinDepositInputError {
+pub enum BitcoinDepositPrevoutError {
     /// The assessed exceeds the max-fee in the deposit request.
     #[error("the assessed fee for a deposit would exceed their max-fee; {0}")]
     AssessedFeeTooHigh(OutPoint),
@@ -152,12 +181,21 @@ pub enum BitcoinDepositInputError {
     UnsupportedLockTime(OutPoint),
 }
 
+impl BitcoinDepositPrevoutError {
+    fn into_error(self, ctx: &BitcoinTxContext) -> Error {
+        Error::BitcoinValidation(Box::new(BitcoinValidationError {
+            error: BitcoinSweepErrorMsg::Deposit(self),
+            context: ctx.clone(),
+        }))
+    }
+}
+
 /// The responses for validation of a sweep transaction on bitcoin.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
 pub enum BitcoinSweepErrorMsg {
     /// The error has something to do with the inputs.
     #[error("deposit error; {0}")]
-    Deposit(#[from] BitcoinDepositInputError),
+    Deposit(#[from] BitcoinDepositPrevoutError),
 }
 
 /// A struct for a bitcoin validation error containing all the necessary
@@ -230,26 +268,28 @@ pub struct DepositRequestReport {
     pub is_accepted: Option<bool>,
     /// The deposit amount
     pub amount: u64,
+    /// The the max fee embedded in the deposit request.
+    pub max_fee: u64,
     /// The lock_time in the reclaim script
     pub lock_time: LockTime,
 }
 
 impl DepositRequestReport {
     /// Validate that the deposit request is okay given the report.
-    pub fn validate(self, chain_tip_height: u64) -> Result<(), BitcoinDepositInputError> {
+    pub fn validate(&self, chain_tip_height: u64) -> Result<(), BitcoinDepositPrevoutError> {
         let confirmed_block_height = match self.status {
             // Deposit requests are only written to the database after they
             // have been confirmed, so this means that we have a record of
             // the request, but it has not been confirmed on the canonical
             // bitcoin blockchain.
             DepositRequestStatus::Unconfirmed => {
-                return Err(BitcoinDepositInputError::TxNotOnBestChain(self.outpoint));
+                return Err(BitcoinDepositPrevoutError::TxNotOnBestChain(self.outpoint));
             }
             // This means that we have a record of the deposit UTXO being
             // spent in a sweep transaction that has been confirmed on the
             // canonical bitcoin blockchain.
             DepositRequestStatus::Spent(txid) => {
-                return Err(BitcoinDepositInputError::DepositUtxoSpent(
+                return Err(BitcoinDepositPrevoutError::DepositUtxoSpent(
                     self.outpoint,
                     txid,
                 ));
@@ -263,18 +303,18 @@ impl DepositRequestReport {
             // If we are here, we know that we have a record for the
             // deposit request, but we have not voted on it yet, so we do
             // not know if we can sign for it.
-            None => return Err(BitcoinDepositInputError::NoVote(self.outpoint)),
+            None => return Err(BitcoinDepositPrevoutError::NoVote(self.outpoint)),
             // In this case we know that we cannot sign for the deposit
             // because it is locked with a public key where the current
             // signer is not part of the signing set.
-            Some(false) => return Err(BitcoinDepositInputError::CannotSignUtxo(self.outpoint)),
+            Some(false) => return Err(BitcoinDepositPrevoutError::CannotSignUtxo(self.outpoint)),
             // Yay.
             Some(true) => (),
         }
         // If we are here then can_sign is Some(true) so is_accepted is
         // Some(_). Let's check whether we rejected this deposit.
         if self.is_accepted != Some(true) {
-            return Err(BitcoinDepositInputError::RejectedRequest(self.outpoint));
+            return Err(BitcoinDepositPrevoutError::RejectedRequest(self.outpoint));
         }
 
         // We only sweep a deposit if the depositor cannot reclaim the
@@ -285,11 +325,13 @@ impl DepositRequestReport {
             LockTime::Blocks(height) => {
                 let max_age = height.value().saturating_sub(DEPOSIT_LOCKTIME_BLOCK_BUFFER) as u64;
                 if deposit_age >= max_age {
-                    return Err(BitcoinDepositInputError::LockTimeExpiry(self.outpoint));
+                    return Err(BitcoinDepositPrevoutError::LockTimeExpiry(self.outpoint));
                 }
             }
             LockTime::Time(_) => {
-                return Err(BitcoinDepositInputError::UnsupportedLockTime(self.outpoint))
+                return Err(BitcoinDepositPrevoutError::UnsupportedLockTime(
+                    self.outpoint,
+                ))
             }
         }
 
@@ -307,7 +349,7 @@ mod tests {
     #[derive(Debug)]
     struct DepositReportErrorMapping {
         report: DepositRequestReport,
-        error: Option<BitcoinDepositInputError>,
+        error: Option<BitcoinDepositPrevoutError>,
         chain_tip_height: u64,
     }
 
@@ -317,10 +359,11 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::TxNotOnBestChain(OutPoint::null())),
+        error: Some(BitcoinDepositPrevoutError::TxNotOnBestChain(OutPoint::null())),
         chain_tip_height: 2,
     } ; "deposit-reorged")]
     #[test_case(DepositReportErrorMapping {
@@ -329,10 +372,11 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::DepositUtxoSpent(OutPoint::null(), BitcoinTxId::from([1; 32]))),
+        error: Some(BitcoinDepositPrevoutError::DepositUtxoSpent(OutPoint::null(), BitcoinTxId::from([1; 32]))),
         chain_tip_height: 2,
     } ; "deposit-spent")]
     #[test_case(DepositReportErrorMapping {
@@ -341,10 +385,11 @@ mod tests {
             can_sign: None,
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::NoVote(OutPoint::null())),
+        error: Some(BitcoinDepositPrevoutError::NoVote(OutPoint::null())),
         chain_tip_height: 2,
     } ; "deposit-no-vote")]
     #[test_case(DepositReportErrorMapping {
@@ -353,10 +398,11 @@ mod tests {
             can_sign: Some(false),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::CannotSignUtxo(OutPoint::null())),
+        error: Some(BitcoinDepositPrevoutError::CannotSignUtxo(OutPoint::null())),
         chain_tip_height: 2,
     } ; "cannot-sign-for-deposit")]
     #[test_case(DepositReportErrorMapping {
@@ -365,10 +411,11 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(false),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::RejectedRequest(OutPoint::null())),
+        error: Some(BitcoinDepositPrevoutError::RejectedRequest(OutPoint::null())),
         chain_tip_height: 2,
     } ; "rejected-deposit")]
     #[test_case(DepositReportErrorMapping {
@@ -377,10 +424,11 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(DEPOSIT_LOCKTIME_BLOCK_BUFFER + 1),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::LockTimeExpiry(OutPoint::null())),
+        error: Some(BitcoinDepositPrevoutError::LockTimeExpiry(OutPoint::null())),
         chain_tip_height: 2,
     } ; "lock-time-expires-soon-1")]
     #[test_case(DepositReportErrorMapping {
@@ -389,10 +437,11 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(DEPOSIT_LOCKTIME_BLOCK_BUFFER + 2),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::LockTimeExpiry(OutPoint::null())),
+        error: Some(BitcoinDepositPrevoutError::LockTimeExpiry(OutPoint::null())),
         chain_tip_height: 2,
     } ; "lock-time-expires-soon-2")]
     #[test_case(DepositReportErrorMapping {
@@ -401,10 +450,11 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_512_second_intervals(u16::MAX),
             outpoint: OutPoint::null(),
         },
-        error: Some(BitcoinDepositInputError::UnsupportedLockTime(OutPoint::null())),
+        error: Some(BitcoinDepositPrevoutError::UnsupportedLockTime(OutPoint::null())),
         chain_tip_height: 2,
     } ; "lock-time-in-time-units-2")]
     #[test_case(DepositReportErrorMapping {
@@ -413,6 +463,7 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(DEPOSIT_LOCKTIME_BLOCK_BUFFER + 3),
             outpoint: OutPoint::null(),
         },
