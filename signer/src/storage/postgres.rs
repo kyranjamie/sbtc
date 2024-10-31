@@ -18,8 +18,8 @@ use stacks_common::types::chainstate::StacksAddress;
 use crate::bitcoin::utxo::SignerUtxo;
 use crate::bitcoin::validation::DepositRequestReport;
 use crate::bitcoin::validation::DepositRequestStatus;
-use crate::bitcoin::validation::WithdrawalRequestStatus;
 use crate::bitcoin::validation::WithdrawalRequestReport;
+use crate::bitcoin::validation::WithdrawalRequestStatus;
 use crate::error::Error;
 use crate::keys::PublicKey;
 use crate::keys::SignerScriptPubKey as _;
@@ -435,6 +435,58 @@ impl PgStore {
         .bind(txid)
         .bind(i32::try_from(output_index).map_err(Error::ConversionDatabaseInt)?)
         .fetch_optional(&self.0)
+        .await
+        .map_err(Error::SqlxQuery)
+    }
+
+    /// Check whether the deposit transaction has been included in a
+    /// bitcoin sweep transaction that has been confirmed on the bitcoin
+    /// blockchain identified by the given chain tip.
+    pub async fn is_deposit_swept(
+        &self,
+        chain_tip: &model::BitcoinBlockHash,
+        txid: &model::BitcoinTxId,
+        output_index: u32,
+        min_block_height: i64,
+    ) -> Result<bool, Error> {
+        sqlx::query_scalar::<_, bool>(
+            r#"
+            WITH RECURSIVE block_chain AS (
+                SELECT 
+                    block_hash
+                    , block_height
+                    , parent_hash
+                FROM sbtc_signer.bitcoin_blocks
+                WHERE block_hash = $1
+
+                UNION ALL
+
+                SELECT
+                    child.block_hash
+                    , child.block_height
+                    , child.parent_hash
+                FROM sbtc_signer.bitcoin_blocks AS child
+                JOIN block_chain AS parent
+                    ON child.block_hash = parent.parent_hash
+                CROSS JOIN deposit_tx_furthest_height AS fh
+                WHERE child.block_height >= $2
+            )
+            SELECT EXISTS (
+                SELECT TRUE
+                FROM sbtc_signer.swept_deposits AS sd
+                JOIN sbtc_signer.bitcoin_transactions AS bt
+                  ON bt.txid = sd.sweep_transaction_txid
+                JOIN block_chain USING (block_hash)
+                WHERE sd.deposit_request_txid = $3
+                  AND sd.deposit_request_output_index = $4
+            )
+            "#,
+        )
+        .bind(chain_tip)
+        .bind(min_block_height)
+        .bind(txid)
+        .bind(i32::try_from(output_index).map_err(Error::ConversionDatabaseInt)?)
+        .fetch_one(&self.0)
         .await
         .map_err(Error::SqlxQuery)
     }
@@ -956,7 +1008,7 @@ impl super::DbRead for PgStore {
                       ON child.block_hash = parent.parent_hash
                     CROSS JOIN deposit_tx_furthest_height AS fh
                     WHERE child.block_height >= $2
-                ),
+                )
                 SELECT
                     ds.is_accepted
                   , ds.can_sign
@@ -986,7 +1038,23 @@ impl super::DbRead for PgStore {
         .map_err(Error::SqlxQuery)?;
 
         let status = match summary.block_height.map(u64::try_from) {
-            Some(Ok(block_height)) => DepositRequestStatus::Confirmed(block_height),
+            // Now that we know that it has been confirmed, check to see if
+            // it has been swept in a bitcoin transaction that has been
+            // confirmed already.
+            Some(Ok(block_height)) => {
+                let is_deposit_spent = self
+                    .is_deposit_swept(chain_tip, txid, output_index, min_block_height)
+                    .await?;
+
+                if is_deposit_spent {
+                    DepositRequestStatus::Spent
+                } else {
+                    DepositRequestStatus::Confirmed(block_height)
+                }
+            }
+            // If we didn't grab the block height in the above query, then
+            // we know that the deposit transaction is not on the
+            // blockchain identified by the chain tip.
             None => DepositRequestStatus::Unconfirmed,
             // Block heights are stored as BIGINTs after conversion from
             // u64s, so converting back to u64s is actually safe.

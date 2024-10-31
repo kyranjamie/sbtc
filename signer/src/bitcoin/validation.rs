@@ -89,26 +89,24 @@ impl BitcoinTxContext {
     {
         let db = ctx.get_storage();
         let Some(signer_txo_input) = self.tx.input.first() else {
-            return Err(BitcoinSignerInputError::InvalidSignerUtxo.into_error(self));
+            return Err(BitcoinSignerInputError::MissingInputs.into_error(self));
         };
         let signer_txo_txid = signer_txo_input.previous_output.txid.into();
 
         let Some(signer_tx) = db.get_bitcoin_tx(&signer_txo_txid).await? else {
-            return Err(BitcoinSignerInputError::InvalidSignerUtxo.into_error(self));
+            return Err(BitcoinSignerInputError::InvalidPrevout.into_error(self));
         };
 
-        let output_index = signer_txo_input
-            .previous_output
-            .vout
-            .try_into()
-            .map_err(|_| Error::TypeConversion)?;
-        let signer_prevout_utxo = signer_tx
-            .tx_out(output_index)
-            .map_err(Error::BitcoinOutputIndex)?;
+        // This as usize cast is fine because we only support CPU
+        // architectures with 32 or 64 bit pointer widths.
+        let output_index = signer_txo_input.previous_output.vout as usize;
+        let Ok(signer_prevout_utxo) = signer_tx.tx_out(output_index) else {
+            return Err(BitcoinSignerInputError::PrevoutMissingFromSourceTx.into_error(self));
+        };
         let script = signer_prevout_utxo.script_pubkey.clone().into();
 
         if !db.is_signer_script_pub_key(&script).await? {
-            return Err(BitcoinSignerInputError::InvalidSignerUtxo.into_error(self));
+            return Err(BitcoinSignerInputError::InvalidPrevout.into_error(self));
         }
 
         Ok(signer_prevout_utxo.value)
@@ -200,10 +198,25 @@ impl BitcoinTxContext {
 /// The responses for validation of a sweep transaction on bitcoin.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
 pub enum BitcoinSignerInputError {
-    /// The signers' UTXO is not locked with the latest aggregate public
-    /// key.
+    /// The signers' input TXO is not locked with a scriptPubKey that the
+    /// signer knows about.
     #[error("signers' UTXO locked with incorrect scriptPubKey")]
-    InvalidSignerUtxo,
+    InvalidPrevout,
+    /// The signer is not part of the signer set that generated the public
+    /// key locking the input.
+    #[error("the signer is not part of the signing set for the aggregate public key")]
+    CannotSignUtxo,
+    /// The transaction is missing inputs...
+    #[error("the transaction is missing inputs")]
+    MissingInputs,
+    /// The signers' input TXO is not locked with a scriptPubKey that the
+    /// signer knows about.
+    #[error("we do not have a record of the transaction pointed to by the signers' prevout")]
+    PrevoutTxMissing,
+    /// We have a record of the transaction pointed to by the signer
+    /// prevout, but output at the specified index is unknown.
+    #[error("the transaction is missing inputs")]
+    PrevoutMissingFromSourceTx,
 }
 
 /// The responses for validation of a sweep transaction on bitcoin.
@@ -227,26 +240,27 @@ pub enum BitcoinDepositInputError {
     #[error("deposit transaction not on canonical bitcoin blockchain; {0}")]
     TxNotOnBestChain(OutPoint),
     /// The deposit UTXO has already been spent.
-    #[error("deposit transaction used as input in another sweep transaction; {0}")]
+    #[error("deposit transaction used as input in confirmed sweep transaction; {0}")]
     DepositUtxoSpent(OutPoint),
     /// Given the current time and block height, it would be imprudent to
     /// attempt to sweep in a deposit request with the given lock-time.
     #[error("lock-time expiration is too soon; {0}")]
     LockTimeExpiry(OutPoint),
-    /// The signer does not have a record of the deposit request in our
-    /// database.
-    #[error("the signer does not have a record of the deposit request; {0}")]
+    /// The signer does not have a record of their vote on the deposit
+    /// request in their database.
+    #[error("the signer does not have a record of their vote on the deposit request; {0}")]
     NoVote(OutPoint),
     /// The signer has rejected the deposit request.
     #[error("the signer has not accepted the deposit request; {0}")]
     RejectedRequest(OutPoint),
-    /// The signer does not have a record of the deposit request in our
+    /// The signer does not have a record of the deposit request in their
     /// database.
     #[error("the signer does not have a record of the deposit request; {0}")]
     Unknown(OutPoint),
-    /// The signer does not have a record of the deposit request in our
-    /// database.
-    #[error("the signer does not have a record of the deposit request; {0}")]
+    /// The locktime in the reclaim script is in time units and that is not
+    /// supported. This shouldn't happen, since we will not put it in our
+    /// database is this is the case.
+    #[error("the deposit locktime is denoted in time and that is not supported; {0}")]
     UnsupportedLockTime(OutPoint),
 }
 
