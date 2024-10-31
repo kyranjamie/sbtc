@@ -14,6 +14,8 @@ use crate::storage::model::QualifiedRequestId;
 use crate::storage::DbRead as _;
 use crate::DEPOSIT_LOCKTIME_BLOCK_BUFFER;
 
+use super::utxo::FeeAssessment;
+
 /// The necessary information for validating a bitcoin transaction.
 #[derive(Debug, Clone)]
 pub struct BitcoinTxContext {
@@ -27,6 +29,8 @@ pub struct BitcoinTxContext {
     pub chain_tip_height: u64,
     /// The transaction that is being validated.
     pub tx: BitcoinTx,
+    /// The total amount of the transaction fee in sats.
+    pub tx_fee: u64,
     /// The withdrawal requests associated with the outputs in the current
     /// transaction.
     pub request_ids: Vec<QualifiedRequestId>,
@@ -55,18 +59,23 @@ impl BitcoinTxContext {
         C: Context + Send + Sync,
     {
         let signer_amount = self.validate_signer_input(ctx).await?;
-        let deposit_amounts = self.validate_deposits(ctx).await?;
+        let deposit_reports = self.fetch_deposit_reports(ctx).await?;
 
         self.validate_signer_outputs(ctx).await?;
         self.validate_withdrawals(ctx).await?;
 
-        let input_amounts = signer_amount + deposit_amounts;
-
-        self.validate_fees(input_amounts)?;
         Ok(())
     }
 
-    fn validate_fees(&self, _input_amounts: Amount) -> Result<(), Error> {
+    fn validate_fees(&self, input_amounts: Amount) -> Result<(), Error> {
+        let withdrawal_amounts = self
+            .tx
+            .output
+            .iter()
+            .map(|tx_out| tx_out.value.to_sat())
+            .sum();
+        let fee = input_amounts.to_sat().saturating_sub(withdrawal_amounts);
+        let fee = Amount::from_sat(fee);
         unimplemented!()
     }
 
@@ -92,14 +101,14 @@ impl BitcoinTxContext {
 
     /// Validate each of the prevouts that coorespond to deposits. This
     /// should be every input except for the first one.
-    async fn validate_deposits<C>(&self, ctx: &C) -> Result<Amount, Error>
+    async fn fetch_deposit_reports<C>(&self, ctx: &C) -> Result<Vec<DepositRequestReport>, Error>
     where
         C: Context + Send + Sync,
     {
         let db = ctx.get_storage();
         let signer_public_key = PublicKey::from_private_key(&ctx.config().signer.private_key);
 
-        let mut deposit_amount = 0;
+        let mut reports: Vec<DepositRequestReport> = Vec::new();
 
         for tx_in in self.tx.input.iter().skip(1) {
             let outpoint = tx_in.previous_output;
@@ -117,15 +126,28 @@ impl BitcoinTxContext {
                 return Err(BitcoinDepositPrevoutError::Unknown(outpoint).into_error(self));
             };
 
-            deposit_amount += report.amount;
-
-            report
-                .validate(self.chain_tip_height)
-                .map_err(|err| err.into_error(self))?;
+            reports.push(report);
         }
 
-        Ok(Amount::from_sat(deposit_amount))
+        Ok(reports)
     }
+
+    /// Validate each of the prevouts that coorespond to deposits. This
+    /// should be every input except for the first one.
+    fn validate_deposits<C>(&self, ctx: &C, reports: &[DepositRequestReport]) -> Result<(), Error>
+    where
+        C: Context + Send + Sync,
+    {
+        reports
+            .iter()
+            .map(|report| {
+                report.validate(self.chain_tip_height)?;
+                report.validate_fee(&self.tx, self.tx_fee)
+            })
+            .collect::<Result<(), _>>()
+            .map_err(|err| err.into_error(self))
+    }
+
 
     /// Validate the withdrawal UTXOs
     async fn validate_withdrawals<C>(&self, _ctx: &C) -> Result<(), Error>
@@ -141,7 +163,7 @@ impl BitcoinTxContext {
 pub enum BitcoinDepositPrevoutError {
     /// The assessed exceeds the max-fee in the deposit request.
     #[error("the assessed fee for a deposit would exceed their max-fee; {0}")]
-    AssessedFeeTooHigh(OutPoint),
+    FeeTooHigh(OutPoint),
     /// The signer is not part of the signer set that generated the
     /// aggregate public key used to lock the deposit funds.
     ///
@@ -276,7 +298,7 @@ pub struct DepositRequestReport {
 
 impl DepositRequestReport {
     /// Validate that the deposit request is okay given the report.
-    pub fn validate(&self, chain_tip_height: u64) -> Result<(), BitcoinDepositPrevoutError> {
+    fn validate(&self, chain_tip_height: u64) -> Result<(), BitcoinDepositPrevoutError> {
         let confirmed_block_height = match self.status {
             // Deposit requests are only written to the database after they
             // have been confirmed, so this means that we have a record of
@@ -335,6 +357,20 @@ impl DepositRequestReport {
             }
         }
 
+        Ok(())
+    }
+
+    /// Validate that the fees assessed to the deposit prevout is below the
+    /// max fee.
+    fn validate_fee(&self, tx: &BitcoinTx, tx_fee: u64) -> Result<(), BitcoinDepositPrevoutError> {
+        let tx_fee = Amount::from_sat(tx_fee);
+        let Some(assessed_fee) = tx.assess_input_fee(&self.outpoint, tx_fee) else {
+            return Err(BitcoinDepositPrevoutError::Unknown(self.outpoint));
+        };
+
+        if assessed_fee.to_sat() > self.max_fee {
+            return Err(BitcoinDepositPrevoutError::FeeTooHigh(self.outpoint));
+        }
         Ok(())
     }
 }
