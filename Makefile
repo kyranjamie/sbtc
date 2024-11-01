@@ -75,7 +75,7 @@ integration-env-down:
 integration-test-full: integration-env-down integration-env-up integration-test integration-env-down
 
 integration-env-up-ci: emily-cdk-synth
-	docker compose --file docker/docker-compose.ci.yml up --detach --quiet-pull
+	docker compose --file docker/docker-compose.ci.yml up --quiet-pull
 	@echo "Wait for aws resources to be set up..."
 	@while docker compose --file docker/docker-compose.ci.yml ps | grep -q 'emily-aws-setup'; do echo "waiting..." && sleep 1; done
 	AWS_ACCESS_KEY_ID=xxxxxxxxxxxx \
