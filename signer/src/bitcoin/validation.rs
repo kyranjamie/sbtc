@@ -11,6 +11,7 @@ use crate::storage::model::BitcoinBlockHash;
 use crate::storage::model::BitcoinTx;
 use crate::storage::model::BitcoinTxId;
 use crate::storage::model::QualifiedRequestId;
+use crate::storage::DbRead as _;
 use crate::DEPOSIT_LOCKTIME_BLOCK_BUFFER;
 
 /// The necessary information for validating a bitcoin transaction.
@@ -70,11 +71,33 @@ impl BitcoinTxContext {
     }
 
     /// Validate the signers' input UTXO
-    async fn validate_signer_input<C>(&self, _ctx: &C) -> Result<Amount, Error>
+    async fn validate_signer_input<C>(&self, ctx: &C) -> Result<Amount, Error>
     where
         C: Context + Send + Sync,
     {
-        unimplemented!()
+        let db = ctx.get_storage();
+        let Some(signer_txo_input) = self.tx.input.first() else {
+            return Err(SignerPrevoutError::MissingInputs.into_error(self));
+        };
+        let signer_txo_txid = signer_txo_input.previous_output.txid.into();
+
+        let Some(signer_tx) = db.get_bitcoin_tx(&signer_txo_txid).await? else {
+            return Err(SignerPrevoutError::TxMissing.into_error(self));
+        };
+
+        // This as usize cast is fine because we only support CPU
+        // architectures with 32 or 64 bit pointer widths.
+        let output_index = signer_txo_input.previous_output.vout as usize;
+        let Ok(signer_prevout_utxo) = signer_tx.tx_out(output_index) else {
+            return Err(SignerPrevoutError::MissingFromSourceTx.into_error(self));
+        };
+        let script = signer_prevout_utxo.script_pubkey.clone().into();
+
+        if !db.is_signer_script_pub_key(&script).await? {
+            return Err(SignerPrevoutError::InvalidPrevout.into_error(self));
+        }
+
+        Ok(signer_prevout_utxo.value)
     }
 
     /// Validate the signer outputs.
@@ -105,6 +128,30 @@ impl BitcoinTxContext {
     {
         unimplemented!()
     }
+}
+
+/// The responses for validation of a sweep transaction on bitcoin.
+#[derive(Debug, thiserror::Error, PartialEq, Eq, Copy, Clone)]
+pub enum SignerPrevoutError {
+    /// The signers' input TXO is not locked with a scriptPubKey that the
+    /// signer knows about.
+    #[error("signers' UTXO locked with incorrect scriptPubKey")]
+    InvalidPrevout,
+    /// The signer is not part of the signer set that generated the public
+    /// key locking the input.
+    #[error("the signer is not part of the signing set for the aggregate public key")]
+    CannotSign,
+    /// The transaction is missing inputs...
+    #[error("the transaction is missing inputs")]
+    MissingInputs,
+    /// The signer does not have a record of the transaction that created
+    /// the signers' input TXO.
+    #[error("we do not have a record of the transaction pointed to by the signers' prevout")]
+    TxMissing,
+    /// We have a record of the transaction pointed to by the signer
+    /// prevout, but output at the specified index is unknown.
+    #[error("the transaction is missing inputs")]
+    MissingFromSourceTx,
 }
 
 /// The responses for validation of a sweep transaction on bitcoin.
@@ -158,6 +205,9 @@ pub enum BitcoinSweepErrorMsg {
     /// The error has something to do with the inputs.
     #[error("deposit error; {0}")]
     Deposit(#[from] BitcoinDepositInputError),
+    /// The error has something to do with the inputs.
+    #[error("signer prevout error: {0}")]
+    SignerPrevout(#[from] SignerPrevoutError),
 }
 
 /// A struct for a bitcoin validation error containing all the necessary
@@ -182,6 +232,15 @@ impl std::fmt::Display for BitcoinValidationError {
 impl std::error::Error for BitcoinValidationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
+    }
+}
+
+impl SignerPrevoutError {
+    fn into_error(self, ctx: &BitcoinTxContext) -> Error {
+        Error::BitcoinValidation(Box::new(BitcoinValidationError {
+            error: BitcoinSweepErrorMsg::SignerPrevout(self),
+            context: ctx.clone(),
+        }))
     }
 }
 
