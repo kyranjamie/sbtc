@@ -117,8 +117,21 @@ pub trait DbRead {
         chain_tip: &model::BitcoinBlockHash,
         txid: &model::BitcoinTxId,
         output_index: u32,
-        signer_public_key: &PublicKey,
     ) -> impl Future<Output = Result<Option<SignerPrevoutReport>, Error>> + Send;
+
+    /// Return the txid of the bitcoin transaction that swept in the
+    /// given UTXO. The sweep transaction must be confirmed on the
+    /// blockchain identified by the given chain tip.
+    ///
+    /// This query only looks back at transactions that are confirmed at or
+    /// after the given `min_block_height`.
+    fn get_sweep_txid(
+        &self,
+        chain_tip: &model::BitcoinBlockHash,
+        txid: &model::BitcoinTxId,
+        output_index: u32,
+        min_block_height: u64,
+    ) -> impl Future<Output = Result<Option<model::BitcoinTxId>, Error>> + Send;
 
     /// Get signer decisions for a deposit request
     fn get_deposit_signers(

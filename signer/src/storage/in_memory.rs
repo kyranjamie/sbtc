@@ -321,8 +321,17 @@ impl super::DbRead for SharedStore {
         _chain_tip: &model::BitcoinBlockHash,
         _txid: &model::BitcoinTxId,
         _output_index: u32,
-        _signer_public_key: &PublicKey,
     ) -> Result<Option<SignerPrevoutReport>, Error> {
+        unimplemented!()
+    }
+
+    async fn get_sweep_txid(
+        &self,
+        _chain_tip: &model::BitcoinBlockHash,
+        _txid: &model::BitcoinTxId,
+        _output_index: u32,
+        _min_block_height: u64,
+    ) -> Result<Option<model::BitcoinTxId>, Error> {
         unimplemented!()
     }
 
