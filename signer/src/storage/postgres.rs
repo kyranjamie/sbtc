@@ -424,37 +424,29 @@ impl PgStore {
         get_utxo(aggregate_key, sbtc_txs)
     }
 
-    /// Return the least height for which the deposit request was confirmed
+    /// Return the least height for which the transaction was confirmed
     /// on a bitcoin blockchain.
     ///
     /// Transactions can be confirmed on more than one blockchain and this
     /// function returns the least height out of all bitcoin blocks for
     /// which the deposit has been confirmed.
     ///
-    /// None is returned if we do not have a record of the deposit request.
-    pub async fn get_deposit_request_least_height(
+    /// None is returned if we do not have a record of the transaction.
+    pub async fn get_confirmation_least_height(
         &self,
         txid: &model::BitcoinTxId,
-        output_index: u32,
     ) -> Result<Option<i64>, Error> {
-        // Before the deposit request is written a signer also stores the
-        // bitcoin transaction and (after #731) the bitcoin block
-        // confirming the deposit to the database. So this will return zero
-        // rows only when we cannot find the deposit request.
         sqlx::query_scalar::<_, i64>(
             r#"
             SELECT block_height
-            FROM sbtc_signer.deposit_requests AS dr
-            JOIN sbtc_signer.bitcoin_transactions USING (txid)
+            FROM sbtc_signer.bitcoin_transactions
             JOIN sbtc_signer.bitcoin_blocks USING (block_hash)
-            WHERE dr.txid = $1
-              AND dr.output_index = $2
+            WHERE txid = $1
             ORDER BY block_height
             LIMIT 1
             "#,
         )
         .bind(txid)
-        .bind(i32::try_from(output_index).map_err(Error::ConversionDatabaseInt)?)
         .fetch_optional(&self.0)
         .await
         .map_err(Error::SqlxQuery)
@@ -533,11 +525,10 @@ impl PgStore {
     ) -> Result<Option<StatusSummary>, Error> {
         // We first get the least height for when the deposit request was
         // confirmed. This height serves as the stopping criteria for the
-        // recursive part of the subsequent query.
-        let min_block_height_fut = self.get_deposit_request_least_height(txid, output_index);
-        // None is only returned if we do not have a record of the deposit
-        // request or the deposit transaction.
-        let Some(min_block_height) = min_block_height_fut.await? else {
+        // recursive part of the subsequent query. None is only returned if
+        // we do not have a record of the deposit request or the deposit
+        // transaction.
+        let Some(min_block_height) = self.get_confirmation_least_height(txid).await? else {
             return Ok(None);
         };
         sqlx::query_as::<_, StatusSummary>(
@@ -1020,15 +1011,11 @@ impl super::DbRead for PgStore {
             return Ok(None);
         };
 
+        let block_height = summary.block_height.map(u64::try_from);
         // The block height and block hash are always None or not None at
-        // the same time.
-        let block_info = summary
-            .block_height
-            .map(u64::try_from)
-            .zip(summary.block_hash);
-
-        // Lastly we map the block_height variable to a status enum.
-        let status = match block_info {
+        // the same time. So now we map the block_height variable to a
+        // status enum.
+        let status = match block_height.zip(summary.block_hash) {
             // Now that we know that it has been confirmed, check to see if
             // it has been swept in a bitcoin transaction that has been
             // confirmed already. We use the height of when the deposit was
