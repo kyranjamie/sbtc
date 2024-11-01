@@ -2544,6 +2544,9 @@ impl super::DbWrite for PgStore {
         // We're doing multiple inserts here so we wrap them in a transaction.
         let mut tx = self.0.begin().await.map_err(Error::SqlxBeginTransaction)?;
 
+        let signer_prevout_output_index = i32::try_from(transaction.signer_prevout_output_index)
+            .map_err(Error::ConversionDatabaseInt)?;
+
         sqlx::query(
             "
             INSERT INTO sweep_transactions (
@@ -2563,10 +2566,7 @@ impl super::DbWrite for PgStore {
         )
         .bind(transaction.txid)
         .bind(transaction.signer_prevout_txid)
-        .bind(
-            i32::try_from(transaction.signer_prevout_output_index)
-                .map_err(Error::ConversionDatabaseInt)?,
-        )
+        .bind(signer_prevout_output_index)
         .bind(
             i64::try_from(transaction.signer_prevout_amount)
                 .map_err(Error::ConversionDatabaseInt)?,
@@ -2580,8 +2580,31 @@ impl super::DbWrite for PgStore {
         .await
         .map_err(Error::SqlxQuery)?;
 
+        sqlx::query(
+            "
+            INSERT INTO swept_prevouts (
+                sweep_transaction_txid
+              , prevout_txid
+              , prevout_output_index
+              , prevout_kind
+            )
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT DO NOTHING;
+        ",
+        )
+        .bind(transaction.txid)
+        .bind(transaction.signer_prevout_txid)
+        .bind(signer_prevout_output_index)
+        .bind(model::PrevoutType::Signers)
+        .execute(&mut *tx)
+        .await
+        .map_err(Error::SqlxQuery)?;
+
         // Insert the swept deposits.
         for deposit in transaction.swept_deposits.iter() {
+            let deposit_request_output_index = i32::try_from(deposit.deposit_request_output_index)
+                .map_err(Error::ConversionDatabaseInt)?;
+
             sqlx::query(
                 "
                 INSERT INTO swept_deposits (
@@ -2597,10 +2620,27 @@ impl super::DbWrite for PgStore {
             .bind(transaction.txid)
             .bind(i32::try_from(deposit.input_index).map_err(Error::ConversionDatabaseInt)?)
             .bind(deposit.deposit_request_txid)
-            .bind(
-                i32::try_from(deposit.deposit_request_output_index)
-                    .map_err(Error::ConversionDatabaseInt)?,
+            .bind(deposit_request_output_index)
+            .execute(&mut *tx)
+            .await
+            .map_err(Error::SqlxQuery)?;
+
+            sqlx::query(
+                "
+                INSERT INTO swept_prevouts (
+                    sweep_transaction_txid
+                  , prevout_txid
+                  , prevout_output_index
+                  , prevout_kind
+                )
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT DO NOTHING;
+            ",
             )
+            .bind(transaction.txid)
+            .bind(deposit.deposit_request_txid)
+            .bind(deposit_request_output_index)
+            .bind(model::PrevoutType::DepositRequest)
             .execute(&mut *tx)
             .await
             .map_err(Error::SqlxQuery)?;

@@ -257,6 +257,33 @@ CREATE TABLE sbtc_signer.swept_deposits (
     FOREIGN KEY (deposit_request_txid, deposit_request_output_index) 
         REFERENCES sbtc_signer.deposit_requests(txid, output_index)
 );
+
+CREATE TYPE sbtc_signer.prevout_type AS ENUM (
+    'signers',
+    'deposit_request',
+    'donation'
+);
+
+-- Represents a single deposit request which has been included in a
+CREATE TABLE sbtc_signer.swept_prevouts (
+    -- References the `packaged_transaction` in which this prevout was included.
+    sweep_transaction_txid BYTEA NOT NULL,
+    -- The Bitcoin transaction ID of the UTXO that is used as an input.
+    prevout_txid BYTEA NOT NULL,
+    -- The prevout output index.
+    prevout_output_index INTEGER NOT NULL,
+    -- The kind of prevout TXO that is being used as an input.
+    prevout_type sbtc_signer.prevout_type NOT NULL,
+
+    PRIMARY KEY (sweep_transaction_txid, prevout_txid, prevout_output_index),
+
+    FOREIGN KEY (sweep_transaction_txid)
+        REFERENCES sbtc_signer.sweep_transactions(txid),
+
+    FOREIGN KEY (prevout_txid)
+        REFERENCES sbtc_signer.transactions(txid)
+);
+
 -- Our main index which will cover searches by 'deposit_request_txid' and
 -- 'deposit_request_output_index', while also restricting the combination to be
 -- unique per 'sweep_transaction_id'.
