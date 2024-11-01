@@ -18,6 +18,7 @@ use blockstack_lib::types::chainstate::StacksBlockId;
 
 use crate::bitcoin::utxo::SignerUtxo;
 use crate::bitcoin::validation::DepositRequestReport;
+use crate::bitcoin::validation::SignerPrevoutReport;
 use crate::error::Error;
 use crate::keys::PublicKey;
 use crate::stacks::events::CompletedDepositEvent;
@@ -96,6 +97,28 @@ pub trait DbRead {
         output_index: u32,
         signer_public_key: &PublicKey,
     ) -> impl Future<Output = Result<Option<DepositRequestReport>, Error>> + Send;
+
+    /// This function returns a signer prevout report that does the
+    /// following:
+    ///
+    /// 1. Check that this signer can contribute a share of the final
+    ///    signature.
+    /// 2. Check that the transaction creating the UTXO is in a block on
+    ///    the bitcoin blockchain identified by the given chain tip.
+    /// 3. Check that the UTXO has not been included in a sweep transaction
+    ///    that has been confirmed by block on the bitcoin blockchain
+    ///    identified by the given chain tip.
+    /// 4. Return the amount locked in the UTXO.
+    ///
+    ///  `Ok(None)` is returned if we do not have a record of the
+    /// transaction that created the UTXO.
+    fn get_signer_prevout_report(
+        &self,
+        chain_tip: &model::BitcoinBlockHash,
+        txid: &model::BitcoinTxId,
+        output_index: u32,
+        signer_public_key: &PublicKey,
+    ) -> impl Future<Output = Result<Option<SignerPrevoutReport>, Error>> + Send;
 
     /// Get signer decisions for a deposit request
     fn get_deposit_signers(

@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::bitcoin::utxo::SignerUtxo;
 use crate::bitcoin::validation::DepositRequestReport;
+use crate::bitcoin::validation::SignerPrevoutReport;
 use crate::error::Error;
 use crate::keys::PublicKey;
 use crate::keys::PublicKeyXOnly;
@@ -312,6 +313,16 @@ impl super::DbRead for SharedStore {
         // You can find an implementation in git commit
         // 717381ebcae4f399c80b9fd8f4506836ff4974ec that handles most of
         // the logic but doesn't handle swept deposits.
+        unimplemented!()
+    }
+
+    async fn get_signer_prevout_report(
+        &self,
+        _chain_tip: &model::BitcoinBlockHash,
+        _txid: &model::BitcoinTxId,
+        _output_index: u32,
+        _signer_public_key: &PublicKey,
+    ) -> Result<Option<SignerPrevoutReport>, Error> {
         unimplemented!()
     }
 

@@ -17,6 +17,7 @@ use stacks_common::types::chainstate::StacksAddress;
 
 use crate::bitcoin::utxo::SignerUtxo;
 use crate::bitcoin::validation::DepositRequestReport;
+use crate::bitcoin::validation::SignerPrevoutReport;
 use crate::bitcoin::validation::TxConfirmationStatus;
 use crate::error::Error;
 use crate::keys::PublicKey;
@@ -29,6 +30,7 @@ use crate::storage::model;
 use crate::storage::model::TransactionType;
 
 use super::util::get_utxo;
+use super::DbRead;
 
 /// All migration scripts from the `signer/migrations` directory.
 static PGSQL_MIGRATIONS: include_dir::Dir =
@@ -98,7 +100,7 @@ pub fn extract_relevant_transactions(
 
 /// A convenience struct for retrieving a deposit request report
 #[derive(sqlx::FromRow)]
-struct StatusSummary {
+struct DepositStatusSummary {
     /// The current signer may not have a record of their vote for
     /// the deposit. When that happens the `is_accepted` and
     /// `can_sign` fields will be None.
@@ -522,7 +524,7 @@ impl PgStore {
         txid: &model::BitcoinTxId,
         output_index: u32,
         signer_public_key: &PublicKey,
-    ) -> Result<Option<StatusSummary>, Error> {
+    ) -> Result<Option<DepositStatusSummary>, Error> {
         // We first get the least height for when the deposit request was
         // confirmed. This height serves as the stopping criteria for the
         // recursive part of the subsequent query. None is only returned if
@@ -531,7 +533,7 @@ impl PgStore {
         let Some(min_block_height) = self.get_confirmation_least_height(txid).await? else {
             return Ok(None);
         };
-        sqlx::query_as::<_, StatusSummary>(
+        sqlx::query_as::<_, DepositStatusSummary>(
             r#"
             WITH RECURSIVE block_chain AS (
                 SELECT 
@@ -568,6 +570,83 @@ impl PgStore {
              AND ds.signer_pub_key = $5
             WHERE dr.txid = $3
               AND dr.output_index = $4
+            LIMIT 1
+            "#,
+        )
+        .bind(chain_tip)
+        .bind(min_block_height)
+        .bind(txid)
+        .bind(i32::try_from(output_index).map_err(Error::ConversionDatabaseInt)?)
+        .bind(signer_public_key)
+        .fetch_optional(&self.0)
+        .await
+        .map_err(Error::SqlxQuery)
+    }
+
+    /// Fetch a status summary of a deposit request.
+    ///
+    /// In this query we list out the blockchain identified by the chain
+    /// tip as far back as necessary. We then check if this signer accepted
+    /// the deposit request, and whether it was confirmed on the blockchain
+    /// that we just listed out.
+    ///
+    /// `None` is returned if deposit request in the database (we always
+    /// write the associated transaction to the database for each deposit
+    /// so that cannot be the reason for why the query here returns
+    /// `None`).
+    async fn get_signer_status_summary(
+        &self,
+        chain_tip: &model::BitcoinBlockHash,
+        txid: &model::BitcoinTxId,
+        output_index: u32,
+        signer_public_key: &PublicKey,
+    ) -> Result<Option<DepositStatusSummary>, Error> {
+        // We first get the least height for when the deposit request was
+        // confirmed. This height serves as the stopping criteria for the
+        // recursive part of the subsequent query. None is only returned if
+        // we do not have a record of the deposit request or the deposit
+        // transaction.
+        let Some(min_block_height) = self.get_confirmation_least_height(txid).await? else {
+            return Ok(None);
+        };
+
+        sqlx::query_as::<_, DepositStatusSummary>(
+            r#"
+            WITH RECURSIVE block_chain AS (
+                SELECT 
+                    block_hash
+                  , block_height
+                  , parent_hash
+                FROM sbtc_signer.bitcoin_blocks
+                WHERE block_hash = $1
+
+                UNION ALL
+
+                SELECT
+                    child.block_hash
+                  , child.block_height
+                  , child.parent_hash
+                FROM sbtc_signer.bitcoin_blocks AS child
+                JOIN block_chain AS parent
+                  ON child.block_hash = parent.parent_hash
+                WHERE child.block_height >= $2
+            )
+            SELECT
+                t.tx
+              , ds.can_sign
+              , dr.amount
+              , dr.lock_time
+              , bc.block_height
+              , bc.block_hash
+            FROM sbtc_signer.transactions AS t
+            JOIN sbtc_signer.bitcoin_transactions AS bt USING (txid)
+            LEFT JOIN block_chain AS bc USING (block_hash)
+            LEFT JOIN sbtc_signer.dkg_shares AS ds
+              ON ds.txid = ds.txid
+             AND dr.output_index = ds.output_index
+             AND ds.signer_pub_key = $5
+            WHERE t.txid = $3
+              AND t.tx_type IN ('sbtc_transaction', 'donation')
             LIMIT 1
             "#,
         )
@@ -1046,6 +1125,60 @@ impl super::DbRead for PgStore {
             amount: summary.amount,
             lock_time: bitcoin::relative::LockTime::from_consensus(summary.lock_time)
                 .map_err(Error::DisabledLockTime)?,
+            outpoint: bitcoin::OutPoint::new((*txid).into(), output_index),
+        }))
+    }
+
+    async fn get_signer_prevout_report(
+        &self,
+        chain_tip: &model::BitcoinBlockHash,
+        txid: &model::BitcoinTxId,
+        output_index: u32,
+        signer_public_key: &PublicKey,
+    ) -> Result<Option<SignerPrevoutReport>, Error> {
+        // Now fetch the deposit summary
+        let summary_fut = self.get_deposit_request_status_summary(
+            chain_tip,
+            txid,
+            output_index,
+            signer_public_key,
+        );
+        let Some(summary) = summary_fut.await? else {
+            return Ok(None);
+        };
+
+        let block_height = summary.block_height.map(u64::try_from);
+        // The block height and block hash are always None or not None at
+        // the same time. So now we map the block_height variable to a
+        // status enum.
+        let status = match block_height.zip(summary.block_hash) {
+            // Now that we know that it has been confirmed, check to see if
+            // it has been swept in a bitcoin transaction that has been
+            // confirmed already. We use the height of when the deposit was
+            // confirmed for the min height for when a sweep transaction
+            // could be confirmed. We could also use block_height + 1.
+            Some((Ok(block_height), block_hash)) => {
+                let deposit_sweep_txid =
+                    self.get_deposit_sweep_txid(chain_tip, txid, output_index, block_height);
+
+                match deposit_sweep_txid.await? {
+                    Some(txid) => TxConfirmationStatus::Spent(txid),
+                    None => TxConfirmationStatus::Confirmed(block_height, block_hash),
+                }
+            }
+            // If we didn't grab the block height in the above query, then
+            // we know that the deposit transaction is not on the
+            // blockchain identified by the chain tip.
+            None => TxConfirmationStatus::Unconfirmed,
+            // Block heights are stored as BIGINTs after conversion from
+            // u64s, so converting back to u64s is actually safe.
+            Some((Err(error), _)) => return Err(Error::ConversionDatabaseInt(error)),
+        };
+
+        Ok(Some(SignerPrevoutReport {
+            status,
+            can_sign: summary.can_sign,
+            amount: summary.amount,
             outpoint: bitcoin::OutPoint::new((*txid).into(), output_index),
         }))
     }

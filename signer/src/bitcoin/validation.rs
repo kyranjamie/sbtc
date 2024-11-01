@@ -268,6 +268,26 @@ pub enum TxConfirmationStatus {
     Unconfirmed,
 }
 
+/// A struct for the status report summary of the signers' UTXO for use in
+/// validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SignerPrevoutReport {
+    /// The outpoint that uniquely identifies the signer UTXO.
+    pub outpoint: OutPoint,
+    /// The confirmation status of the transaction that creates the
+    /// signers' UTXO.
+    pub status: TxConfirmationStatus,
+    /// Whether this signer was part of the signing set associated with the
+    /// deposited funds. If the signer is not part of the signing set, then
+    /// we do not do a check of whether we will accept it otherwise.
+    ///
+    /// This will only be `None` if we do not have a record of the deposit
+    /// request.
+    pub can_sign: Option<bool>,
+    /// The deposit amount
+    pub amount: u64,
+}
+
 /// A struct for the status report summary of a deposit request for use
 /// in validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
