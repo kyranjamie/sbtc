@@ -81,15 +81,12 @@ impl BitcoinTxContext {
             return Err(SignerPrevoutError::MissingInputs.into_error(self));
         };
 
-        let signer_public_key = PublicKey::from_private_key(&ctx.config().signer.private_key);
-
         // The `as usize` cast is fine because we only support CPU targets
         // that have 32 or 64 width pointers.
         let output_index = signer_txo_input.previous_output.vout;
         let txid = signer_txo_input.previous_output.txid.into();
 
-        let report =
-            db.get_signer_prevout_report(&self.chain_tip, &txid, output_index, &signer_public_key);
+        let report = db.get_signer_prevout_report(&self.chain_tip, &txid, output_index);
 
         let Some(report) = report.await? else {
             return Err(SignerPrevoutError::TxMissing.into_error(self));
@@ -275,13 +272,6 @@ pub struct SignerPrevoutReport {
     /// The confirmation status of the transaction that creates the
     /// signers' UTXO.
     pub status: TxConfirmationStatus,
-    /// Whether this signer was part of the signing set associated with the
-    /// deposited funds. If the signer is not part of the signing set, then
-    /// we do not do a check of whether we will accept it otherwise.
-    ///
-    /// This will only be `None` if we do not have a record of the deposit
-    /// request.
-    pub can_sign: bool,
     /// The deposit amount
     pub amount: u64,
     /// The type of transaction
