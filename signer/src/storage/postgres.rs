@@ -30,7 +30,6 @@ use crate::storage::model;
 use crate::storage::model::TransactionType;
 
 use super::util::get_utxo;
-use super::DbRead;
 
 /// All migration scripts from the `signer/migrations` directory.
 static PGSQL_MIGRATIONS: include_dir::Dir =
@@ -119,6 +118,20 @@ struct DepositStatusSummary {
     /// The amount associated with the deposit UTXO in sats.
     #[sqlx(try_from = "i64")]
     amount: u64,
+}
+
+/// A convenience struct for retrieving a deposit request report
+#[derive(sqlx::FromRow)]
+struct TxStatusSummary {
+    /// The raw transaction.
+    tx: model::BitcoinTx,
+    /// The transaciton type.
+    tx_type: model::TransactionType,
+    /// The height of the block that confirmed the deposit request
+    /// transaction.
+    block_height: Option<i64>,
+    /// The block hash that confirmed the deposit request.
+    block_hash: Option<model::BitcoinBlockHash>,
 }
 
 /// A wrapper around a [`sqlx::PgPool`] which implements
@@ -507,6 +520,58 @@ impl PgStore {
         .map_err(Error::SqlxQuery)
     }
 
+    /// Return the txid of the bitcoin transaction that swept in the
+    /// deposit UTXO. The sweep transaction must be confirmed on the
+    /// blockchain identified by the given chain tip.
+    ///
+    /// This query only looks back at transactions that are confirmed at or
+    /// after the given `min_block_height`.
+    async fn get_signer_sweep_txid(
+        &self,
+        chain_tip: &model::BitcoinBlockHash,
+        txid: &model::BitcoinTxId,
+        output_index: u32,
+        min_block_height: u64,
+    ) -> Result<Option<model::BitcoinTxId>, Error> {
+        sqlx::query_scalar::<_, model::BitcoinTxId>(
+            r#"
+            WITH RECURSIVE block_chain AS (
+                SELECT 
+                    block_hash
+                  , block_height
+                  , parent_hash
+                FROM sbtc_signer.bitcoin_blocks
+                WHERE block_hash = $1
+
+                UNION ALL
+
+                SELECT
+                    child.block_hash
+                  , child.block_height
+                  , child.parent_hash
+                FROM sbtc_signer.bitcoin_blocks AS child
+                JOIN block_chain AS parent
+                  ON child.block_hash = parent.parent_hash
+                WHERE child.block_height >= $2
+            )
+            SELECT st.sweep_transaction_txid
+            FROM sbtc_signer.sweep_transactions AS st
+            JOIN sbtc_signer.bitcoin_transactions AS bt USING (txid)
+            JOIN block_chain USING (block_hash)
+            WHERE st.signer_prevout_txid = $3
+              AND st.signer_prevout_output_index = $4
+            LIMIT 1
+            "#,
+        )
+        .bind(chain_tip)
+        .bind(i64::try_from(min_block_height).map_err(Error::ConversionDatabaseInt)?)
+        .bind(txid)
+        .bind(i32::try_from(output_index).map_err(Error::ConversionDatabaseInt)?)
+        .fetch_optional(&self.0)
+        .await
+        .map_err(Error::SqlxQuery)
+    }
+
     /// Fetch a status summary of a deposit request.
     ///
     /// In this query we list out the blockchain identified by the chain
@@ -598,9 +663,7 @@ impl PgStore {
         &self,
         chain_tip: &model::BitcoinBlockHash,
         txid: &model::BitcoinTxId,
-        output_index: u32,
-        signer_public_key: &PublicKey,
-    ) -> Result<Option<DepositStatusSummary>, Error> {
+    ) -> Result<Option<TxStatusSummary>, Error> {
         // We first get the least height for when the deposit request was
         // confirmed. This height serves as the stopping criteria for the
         // recursive part of the subsequent query. None is only returned if
@@ -610,7 +673,7 @@ impl PgStore {
             return Ok(None);
         };
 
-        sqlx::query_as::<_, DepositStatusSummary>(
+        sqlx::query_as::<_, TxStatusSummary>(
             r#"
             WITH RECURSIVE block_chain AS (
                 SELECT 
@@ -633,18 +696,12 @@ impl PgStore {
             )
             SELECT
                 t.tx
-              , ds.can_sign
-              , dr.amount
-              , dr.lock_time
+              , t.tx_type
               , bc.block_height
               , bc.block_hash
             FROM sbtc_signer.transactions AS t
             JOIN sbtc_signer.bitcoin_transactions AS bt USING (txid)
             LEFT JOIN block_chain AS bc USING (block_hash)
-            LEFT JOIN sbtc_signer.dkg_shares AS ds
-              ON ds.txid = ds.txid
-             AND dr.output_index = ds.output_index
-             AND ds.signer_pub_key = $5
             WHERE t.txid = $3
               AND t.tx_type IN ('sbtc_transaction', 'donation')
             LIMIT 1
@@ -653,8 +710,6 @@ impl PgStore {
         .bind(chain_tip)
         .bind(min_block_height)
         .bind(txid)
-        .bind(i32::try_from(output_index).map_err(Error::ConversionDatabaseInt)?)
-        .bind(signer_public_key)
         .fetch_optional(&self.0)
         .await
         .map_err(Error::SqlxQuery)
@@ -1136,16 +1191,32 @@ impl super::DbRead for PgStore {
         output_index: u32,
         signer_public_key: &PublicKey,
     ) -> Result<Option<SignerPrevoutReport>, Error> {
-        // Now fetch the deposit summary
-        let summary_fut = self.get_deposit_request_status_summary(
-            chain_tip,
-            txid,
-            output_index,
-            signer_public_key,
-        );
-        let Some(summary) = summary_fut.await? else {
+        let Some(summary) = self.get_signer_status_summary(chain_tip, txid).await? else {
             return Ok(None);
         };
+
+        // This `as usize` cast is fine because we only support CPU
+        // architectures with 32 or 64 bit pointer widths.
+        let Ok(signer_prevout_utxo) = summary.tx.tx_out(output_index as usize) else {
+            return Ok(None);
+        };
+        let script: model::ScriptPubKey = signer_prevout_utxo.script_pubkey.clone().into();
+
+        let can_sign = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS (
+                SELECT TRUE
+                FROM sbtc_signer.dkg_shares AS ds
+                WHERE $1 = ANY(signer_set_public_keys)
+                  AND script_pubkey = $2
+            )
+            "#,
+        )
+        .bind(signer_public_key)
+        .bind(script)
+        .fetch_one(&self.0)
+        .await
+        .map_err(Error::SqlxQuery)?;
 
         let block_height = summary.block_height.map(u64::try_from);
         // The block height and block hash are always None or not None at
@@ -1158,10 +1229,10 @@ impl super::DbRead for PgStore {
             // confirmed for the min height for when a sweep transaction
             // could be confirmed. We could also use block_height + 1.
             Some((Ok(block_height), block_hash)) => {
-                let deposit_sweep_txid =
-                    self.get_deposit_sweep_txid(chain_tip, txid, output_index, block_height);
+                let signer_sweep_txid =
+                    self.get_signer_sweep_txid(chain_tip, txid, output_index, block_height);
 
-                match deposit_sweep_txid.await? {
+                match signer_sweep_txid.await? {
                     Some(txid) => TxConfirmationStatus::Spent(txid),
                     None => TxConfirmationStatus::Confirmed(block_height, block_hash),
                 }
@@ -1176,10 +1247,11 @@ impl super::DbRead for PgStore {
         };
 
         Ok(Some(SignerPrevoutReport {
-            status,
-            can_sign: summary.can_sign,
-            amount: summary.amount,
             outpoint: bitcoin::OutPoint::new((*txid).into(), output_index),
+            can_sign,
+            amount: signer_prevout_utxo.value.to_sat(),
+            status,
+            tx_type: summary.tx_type,
         }))
     }
 

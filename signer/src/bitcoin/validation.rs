@@ -11,6 +11,7 @@ use crate::storage::model::BitcoinBlockHash;
 use crate::storage::model::BitcoinTx;
 use crate::storage::model::BitcoinTxId;
 use crate::storage::model::QualifiedRequestId;
+use crate::storage::model::TransactionType;
 use crate::storage::DbRead as _;
 use crate::DEPOSIT_LOCKTIME_BLOCK_BUFFER;
 
@@ -79,25 +80,22 @@ impl BitcoinTxContext {
         let Some(signer_txo_input) = self.tx.input.first() else {
             return Err(SignerPrevoutError::MissingInputs.into_error(self));
         };
-        let signer_txo_txid = signer_txo_input.previous_output.txid.into();
 
-        let Some(signer_tx) = db.get_bitcoin_tx(&signer_txo_txid, &self.chain_tip).await? else {
+        let signer_public_key = PublicKey::from_private_key(&ctx.config().signer.private_key);
+
+        // The `as usize` cast is fine because we only support CPU targets
+        // that have 32 or 64 width pointers.
+        let output_index = signer_txo_input.previous_output.vout;
+        let txid = signer_txo_input.previous_output.txid.into();
+
+        let report =
+            db.get_signer_prevout_report(&self.chain_tip, &txid, output_index, &signer_public_key);
+
+        let Some(report) = report.await? else {
             return Err(SignerPrevoutError::TxMissing.into_error(self));
         };
 
-        // This as usize cast is fine because we only support CPU
-        // architectures with 32 or 64 bit pointer widths.
-        let output_index = signer_txo_input.previous_output.vout as usize;
-        let Ok(signer_prevout_utxo) = signer_tx.tx_out(output_index) else {
-            return Err(SignerPrevoutError::MissingFromSourceTx.into_error(self));
-        };
-        let script = signer_prevout_utxo.script_pubkey.clone().into();
-
-        if !db.is_signer_script_pub_key(&script).await? {
-            return Err(SignerPrevoutError::InvalidPrevout.into_error(self));
-        }
-
-        Ok(signer_prevout_utxo.value)
+        Ok(Amount::from_sat(report.amount))
     }
 
     /// Validate the signer outputs.
@@ -283,9 +281,11 @@ pub struct SignerPrevoutReport {
     ///
     /// This will only be `None` if we do not have a record of the deposit
     /// request.
-    pub can_sign: Option<bool>,
+    pub can_sign: bool,
     /// The deposit amount
     pub amount: u64,
+    /// The type of transaction
+    pub tx_type: TransactionType,
 }
 
 /// A struct for the status report summary of a deposit request for use
