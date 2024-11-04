@@ -628,6 +628,9 @@ pub enum PrevoutType {
     Signers,
     /// A donation to signers aggregated key on Bitcoin.
     Donation,
+    /// We could not figure out what type of prevout this was associated
+    /// with.
+    Unknown,
 }
 
 /// An identifier for a withdrawal request, comprised of the Stacks

@@ -261,7 +261,8 @@ CREATE TABLE sbtc_signer.swept_deposits (
 CREATE TYPE sbtc_signer.prevout_type AS ENUM (
     'signers',
     'deposit_request',
-    'donation'
+    'donation',
+    'unknown',
 );
 
 -- Represents a single deposit request which has been included in a

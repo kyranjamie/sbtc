@@ -30,6 +30,7 @@ use crate::storage::model;
 use crate::storage::model::TransactionType;
 
 use super::util::get_utxo;
+use super::DbRead;
 
 /// All migration scripts from the `signer/migrations` directory.
 static PGSQL_MIGRATIONS: include_dir::Dir =
@@ -169,14 +170,13 @@ impl TxStatusSummary {
 
 impl TxConfirmationStatus {
     /// Convert a function that
-    pub async fn from_block<F, Fut>(
+    async fn from_block(
         block_ref: Option<model::BitcoinBlockRef>,
-        func: F,
-    ) -> Result<Self, Error>
-    where
-        F: Fn(u64) -> Fut,
-        Fut: std::future::Future<Output = Result<Option<model::BitcoinTxId>, Error>>,
-    {
+        db: &PgStore,
+        chain_tip: &model::BitcoinBlockHash,
+        txid: &model::BitcoinTxId,
+        output_index: u32,
+    ) -> Result<Self, Error> {
         match block_ref {
             // Now that we know that it has been confirmed, check to see if
             // it has been swept in a bitcoin transaction that has been
@@ -184,7 +184,8 @@ impl TxConfirmationStatus {
             // confirmed for the min height for when a sweep transaction
             // could be confirmed. We could also use block_height + 1.
             Some(model::BitcoinBlockRef { block_height, block_hash }) => {
-                match func(block_height).await? {
+                let txid_fut = db.get_sweep_txid(chain_tip, txid, output_index, block_height);
+                match txid_fut.await? {
                     Some(txid) => Ok(TxConfirmationStatus::Spent(txid)),
                     None => Ok(TxConfirmationStatus::Confirmed(block_height, block_hash)),
                 }
@@ -1157,37 +1158,9 @@ impl super::DbRead for PgStore {
         };
 
         let block_ref = summary.block_ref();
-
-        let func =
-            |min_block_height| self.get_sweep_txid(chain_tip, txid, output_index, min_block_height);
-        let status = TxConfirmationStatus::from_block(block_ref, func).await?;
-        // let block_height = summary.block_height.map(u64::try_from);
-        // // The block height and block hash are always None or not None at
-        // // the same time. So now we map the block_height variable to a
-        // // status enum.
-        // let status = match block_height.zip(summary.block_hash) {
-        //     // Now that we know that it has been confirmed, check to see if
-        //     // it has been swept in a bitcoin transaction that has been
-        //     // confirmed already. We use the height of when the deposit was
-        //     // confirmed for the min height for when a sweep transaction
-        //     // could be confirmed. We could also use block_height + 1.
-        //     Some((Ok(block_height), block_hash)) => {
-        //         let deposit_sweep_txid =
-        //             self.get_deposit_sweep_txid(chain_tip, txid, output_index, block_height);
-
-        //         match deposit_sweep_txid.await? {
-        //             Some(txid) => TxConfirmationStatus::Spent(txid),
-        //             None => TxConfirmationStatus::Confirmed(block_height, block_hash),
-        //         }
-        //     }
-        //     // If we didn't grab the block height in the above query, then
-        //     // we know that the deposit transaction is not on the
-        //     // blockchain identified by the chain tip.
-        //     None => TxConfirmationStatus::Unconfirmed,
-        //     // Block heights are stored as BIGINTs after conversion from
-        //     // u64s, so converting back to u64s is actually safe.
-        //     Some((Err(error), _)) => return Err(Error::ConversionDatabaseInt(error)),
-        // };
+        let status =
+            TxConfirmationStatus::from_block(block_ref, self, chain_tip, txid, output_index)
+                .await?;
 
         Ok(Some(DepositRequestReport {
             status,
@@ -1216,26 +1189,10 @@ impl super::DbRead for PgStore {
             return Ok(None);
         };
 
-        let status = match summary.block_ref() {
-            // Now that we know that it has been confirmed, check to see if
-            // it has been swept in a bitcoin transaction that has been
-            // confirmed already. We use the height of when the deposit was
-            // confirmed for the min height for when a sweep transaction
-            // could be confirmed. We could also use block_height + 1.
-            Some(model::BitcoinBlockRef { block_height, block_hash }) => {
-                let signer_sweep_txid =
-                    self.get_sweep_txid(chain_tip, txid, output_index, block_height);
-
-                match signer_sweep_txid.await? {
-                    Some(txid) => TxConfirmationStatus::Spent(txid),
-                    None => TxConfirmationStatus::Confirmed(block_height, block_hash),
-                }
-            }
-            // If we didn't grab the block height in the above query, then
-            // we know that the deposit transaction is not on the
-            // blockchain identified by the chain tip.
-            None => TxConfirmationStatus::Unconfirmed,
-        };
+        let block_ref = summary.block_ref();
+        let status =
+            TxConfirmationStatus::from_block(block_ref, self, chain_tip, txid, output_index)
+                .await?;
 
         Ok(Some(SignerPrevoutReport {
             outpoint: bitcoin::OutPoint::new((*txid).into(), output_index),
