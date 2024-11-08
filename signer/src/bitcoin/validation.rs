@@ -11,7 +11,10 @@ use crate::storage::model::BitcoinBlockHash;
 use crate::storage::model::BitcoinTx;
 use crate::storage::model::BitcoinTxId;
 use crate::storage::model::QualifiedRequestId;
+use crate::storage::DbRead as _;
 use crate::DEPOSIT_LOCKTIME_BLOCK_BUFFER;
+
+use super::utxo::FeeAssessment as _;
 
 /// The necessary information for validating a bitcoin transaction.
 #[derive(Debug, Clone)]
@@ -26,6 +29,8 @@ pub struct BitcoinTxContext {
     pub chain_tip_height: u64,
     /// The transaction that is being validated.
     pub tx: BitcoinTx,
+    /// The total amount of the transaction fee in sats.
+    pub tx_fee: u64,
     /// The withdrawal requests associated with the outputs in the current
     /// transaction.
     pub request_ids: Vec<QualifiedRequestId>,
@@ -53,20 +58,10 @@ impl BitcoinTxContext {
     where
         C: Context + Send + Sync,
     {
-        let signer_amount = self.validate_signer_input(ctx).await?;
-        let deposit_amounts = self.validate_deposits(ctx).await?;
+        self.validate_deposits(ctx).await?;
 
-        self.validate_signer_outputs(ctx).await?;
         self.validate_withdrawals(ctx).await?;
-
-        let input_amounts = signer_amount + deposit_amounts;
-
-        self.validate_fees(input_amounts)?;
         Ok(())
-    }
-
-    fn validate_fees(&self, _input_amounts: Amount) -> Result<(), Error> {
-        unimplemented!()
     }
 
     /// Validate the signers' input UTXO
@@ -91,11 +86,52 @@ impl BitcoinTxContext {
 
     /// Validate each of the prevouts that coorespond to deposits. This
     /// should be every input except for the first one.
-    async fn validate_deposits<C>(&self, _ctx: &C) -> Result<Amount, Error>
+    async fn fetch_deposit_reports<C>(&self, ctx: &C) -> Result<Vec<DepositRequestReport>, Error>
     where
         C: Context + Send + Sync,
     {
-        unimplemented!()
+        let db = ctx.get_storage();
+        let signer_public_key = PublicKey::from_private_key(&ctx.config().signer.private_key);
+
+        let mut reports: Vec<DepositRequestReport> = Vec::new();
+
+        for tx_in in self.tx.input.iter().skip(1) {
+            let outpoint = tx_in.previous_output;
+            let txid = outpoint.txid.into();
+            let report_future = db.get_deposit_request_report(
+                &self.chain_tip,
+                &txid,
+                outpoint.vout,
+                &signer_public_key,
+            );
+
+            // The DbRead::get_deposit_request_report only returns Ok(None)
+            // if there isn't a record of the deposit request.
+            let Some(report) = report_future.await? else {
+                return Err(BitcoinDepositInputError::Unknown(outpoint).into_error(self));
+            };
+
+            reports.push(report);
+        }
+
+        Ok(reports)
+    }
+
+    /// Validate each of the prevouts that coorespond to deposits. This
+    /// should be every input except for the first one.
+    async fn validate_deposits<C>(&self, ctx: &C) -> Result<(), Error>
+    where
+        C: Context + Send + Sync,
+    {
+        self.fetch_deposit_reports(ctx)
+            .await?
+            .into_iter()
+            .map(|report| {
+                report.validate(self.chain_tip_height)?;
+                report.validate_fee(&self.tx, self.tx_fee)
+            })
+            .collect::<Result<(), _>>()
+            .map_err(|err| err.into_error(self))
     }
 
     /// Validate the withdrawal UTXOs
@@ -112,7 +148,7 @@ impl BitcoinTxContext {
 pub enum BitcoinDepositInputError {
     /// The assessed exceeds the max-fee in the deposit request.
     #[error("the assessed fee for a deposit would exceed their max-fee; {0}")]
-    AssessedFeeTooHigh(OutPoint),
+    FeeTooHigh(OutPoint),
     /// The signer is not part of the signer set that generated the
     /// aggregate public key used to lock the deposit funds.
     ///
@@ -150,6 +186,15 @@ pub enum BitcoinDepositInputError {
     /// database is this is the case.
     #[error("the deposit locktime is denoted in time and that is not supported; {0}")]
     UnsupportedLockTime(OutPoint),
+}
+
+impl BitcoinDepositInputError {
+    fn into_error(self, ctx: &BitcoinTxContext) -> Error {
+        Error::BitcoinValidation(Box::new(BitcoinValidationError {
+            error: BitcoinSweepErrorMsg::Deposit(self),
+            context: ctx.clone(),
+        }))
+    }
 }
 
 /// The responses for validation of a sweep transaction on bitcoin.
@@ -230,6 +275,8 @@ pub struct DepositRequestReport {
     pub is_accepted: Option<bool>,
     /// The deposit amount
     pub amount: u64,
+    /// The the max fee embedded in the deposit request.
+    pub max_fee: u64,
     /// The lock_time in the reclaim script
     pub lock_time: LockTime,
 }
@@ -295,6 +342,20 @@ impl DepositRequestReport {
 
         Ok(())
     }
+
+    /// Validate that the fees assessed to the deposit prevout is below the
+    /// max fee.
+    fn validate_fee(&self, tx: &BitcoinTx, tx_fee: u64) -> Result<(), BitcoinDepositInputError> {
+        let tx_fee = Amount::from_sat(tx_fee);
+        let Some(assessed_fee) = tx.assess_input_fee(&self.outpoint, tx_fee) else {
+            return Err(BitcoinDepositInputError::Unknown(self.outpoint));
+        };
+
+        if assessed_fee.to_sat() > self.max_fee {
+            return Err(BitcoinDepositInputError::FeeTooHigh(self.outpoint));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +378,7 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
@@ -329,6 +391,7 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
@@ -341,6 +404,7 @@ mod tests {
             can_sign: None,
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
@@ -353,6 +417,7 @@ mod tests {
             can_sign: Some(false),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
@@ -365,6 +430,7 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(false),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(u16::MAX),
             outpoint: OutPoint::null(),
         },
@@ -377,6 +443,7 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(DEPOSIT_LOCKTIME_BLOCK_BUFFER + 1),
             outpoint: OutPoint::null(),
         },
@@ -389,6 +456,7 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(DEPOSIT_LOCKTIME_BLOCK_BUFFER + 2),
             outpoint: OutPoint::null(),
         },
@@ -401,6 +469,7 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_512_second_intervals(u16::MAX),
             outpoint: OutPoint::null(),
         },
@@ -413,6 +482,7 @@ mod tests {
             can_sign: Some(true),
             is_accepted: Some(true),
             amount: 0,
+            max_fee: u64::MAX,
             lock_time: LockTime::from_height(DEPOSIT_LOCKTIME_BLOCK_BUFFER + 3),
             outpoint: OutPoint::null(),
         },
