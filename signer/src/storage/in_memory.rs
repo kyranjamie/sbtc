@@ -1093,6 +1093,10 @@ impl super::DbWrite for SharedStore {
         Ok(())
     }
 
+    async fn write_signer_txo(&self, _signer_output: &model::SignerOutput) -> Result<(), Error> {
+        unimplemented!()
+    }
+
     async fn write_sweep_transaction(&self, tx: &model::SweepTransaction) -> Result<(), Error> {
         let mut store = self.lock().await;
         store.sweep_transactions.push(tx.clone());

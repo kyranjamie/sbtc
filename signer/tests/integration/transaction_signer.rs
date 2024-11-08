@@ -88,8 +88,9 @@ fn sweep_transaction_info<R: rand::RngCore>(
     deposit_requests: &[model::DepositRequest],
     withdrawal_requests: &[model::WithdrawalRequest],
 ) -> message::SweepTransactionInfo {
+    let txid = testing::dummy::txid(&fake::Faker, rng);
     message::SweepTransactionInfo {
-        txid: testing::dummy::txid(&fake::Faker, rng),
+        txid,
         created_at_block_hash,
         amount: 100,
         fee: 1,
@@ -116,18 +117,13 @@ fn sweep_transaction_info<R: rand::RngCore>(
                 withdrawal_request_block_hash: *req.block_hash.as_bytes(),
             })
             .collect(),
-        sweep_signer_outputs: vec![
-            message::SweepSignerOutput {
-                output_index: 0,
-                script_pubkey: fake::Faker.fake_with_rng(rng),
-                amount: 12345,
-            },
-            message::SweepSignerOutput {
-                output_index: 1,
-                script_pubkey: bitcoin::ScriptBuf::new_op_return([0; 41]).into(),
-                amount: 0,
-            },
-        ],
+        signer_outputs: vec![message::SignerOutput {
+            txid: txid.into(),
+            output_index: 0,
+            script_pubkey: fake::Faker.fake_with_rng(rng),
+            amount: 12345,
+            txo_type: model::TxoType::Signers,
+        }],
     }
 }
 
