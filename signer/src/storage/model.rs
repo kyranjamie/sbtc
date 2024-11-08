@@ -135,6 +135,8 @@ pub struct SweepSignerOutput {
     /// The scriptPubKey locking the output.
     pub script_pubkey: ScriptPubKey,
     /// The amount created in the output.
+    #[sqlx(try_from = "i64")]
+    #[cfg_attr(feature = "testing", dummy(faker = "1_000_000..1_000_000_000"))]
     pub amount: u64,
 }
 
