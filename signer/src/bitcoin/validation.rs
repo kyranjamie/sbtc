@@ -29,6 +29,8 @@ pub struct BitcoinTxContext {
     pub chain_tip_height: u64,
     /// The transaction that is being validated.
     pub tx: BitcoinTx,
+    /// The deposit requests associated with the inputs in the transaction.
+    pub deposit_requests: Vec<OutPoint>,
     /// The total amount of the transaction fee in sats.
     pub tx_fee: u64,
     /// The withdrawal requests associated with the outputs in the current
@@ -64,26 +66,6 @@ impl BitcoinTxContext {
         Ok(())
     }
 
-    /// Validate the signers' input UTXO
-    async fn validate_signer_input<C>(&self, _ctx: &C) -> Result<Amount, Error>
-    where
-        C: Context + Send + Sync,
-    {
-        unimplemented!()
-    }
-
-    /// Validate the signer outputs.
-    ///
-    /// Each sweep transaction has two signer outputs, the new UTXO with
-    /// all of the signers' funds and an `OP_RETURN` TXO. This function
-    /// validates both of them.
-    async fn validate_signer_outputs<C>(&self, _ctx: &C) -> Result<(), Error>
-    where
-        C: Context + Send + Sync,
-    {
-        unimplemented!()
-    }
-
     /// Validate each of the prevouts that coorespond to deposits. This
     /// should be every input except for the first one.
     async fn fetch_deposit_reports<C>(&self, ctx: &C) -> Result<Vec<DepositRequestReport>, Error>
@@ -95,8 +77,7 @@ impl BitcoinTxContext {
 
         let mut reports: Vec<DepositRequestReport> = Vec::new();
 
-        for tx_in in self.tx.input.iter().skip(1) {
-            let outpoint = tx_in.previous_output;
+        for outpoint in self.deposit_requests.iter() {
             let txid = outpoint.txid.into();
             let report_future = db.get_deposit_request_report(
                 &self.chain_tip,
@@ -108,7 +89,7 @@ impl BitcoinTxContext {
             // The DbRead::get_deposit_request_report only returns Ok(None)
             // if there isn't a record of the deposit request.
             let Some(report) = report_future.await? else {
-                return Err(BitcoinDepositInputError::Unknown(outpoint).into_error(self));
+                return Err(BitcoinDepositInputError::Unknown(*outpoint).into_error(self));
             };
 
             reports.push(report);
@@ -126,11 +107,10 @@ impl BitcoinTxContext {
         self.fetch_deposit_reports(ctx)
             .await?
             .into_iter()
-            .map(|report| {
+            .try_for_each(|report| {
                 report.validate(self.chain_tip_height)?;
                 report.validate_fee(&self.tx, self.tx_fee)
             })
-            .collect::<Result<(), _>>()
             .map_err(|err| err.into_error(self))
     }
 
@@ -139,7 +119,11 @@ impl BitcoinTxContext {
     where
         C: Context + Send + Sync,
     {
-        unimplemented!()
+        if !self.request_ids.is_empty() {
+            return Err(Error::MissingBlock);
+        }
+
+        Ok(())
     }
 }
 
