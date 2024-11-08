@@ -183,25 +183,6 @@ pub trait DbRead {
 
     /// Get the outstanding signer UTXO.
     ///
-    /// Under normal conditions, the signer will have only one UTXO they can spend.
-    /// The specific UTXO we want is one such that:
-    /// 1. The transaction is in a block on the canonical bitcoin blockchain.
-    /// 2. The output is the first output in the transaction.
-    /// 3. The output's `scriptPubKey` matches `aggregate_key`.
-    /// 4. The output is unspent. It is possible for more than one transaction
-    ///     within the same block to satisfy points 1-3, but if the signers
-    ///     have one or more transactions within a block, exactly one output
-    ///     satisfying points 1-3 will be unspent.
-    /// 5. The block that includes the transaction that satisfies points 1-4 has the greatest height of all such blocks.
-    fn get_signer_utxo(
-        &self,
-        chain_tip: &model::BitcoinBlockHash,
-        aggregate_key: &crate::keys::PublicKey,
-        context_window: u16,
-    ) -> impl Future<Output = Result<Option<SignerUtxo>, Error>> + Send;
-
-    /// Get the outstanding signer UTXO.
-    ///
     /// Under normal conditions, the signer will have only one UTXO they
     /// can spend. The specific UTXO we want is one such that:
     /// 1. The transaction is in a block on the canonical bitcoin
@@ -213,7 +194,7 @@ pub trait DbRead {
     ///    exactly one output satisfying points 1-3 will be unspent.
     /// 4. The block that includes the transaction that satisfies points
     ///    1-4 has the greatest height of all such blocks.
-    fn get_signer_utxo2(
+    fn get_signer_utxo(
         &self,
         chain_tip: &model::BitcoinBlockHash,
         context_window: u16,

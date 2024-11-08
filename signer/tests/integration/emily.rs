@@ -209,6 +209,7 @@ async fn deposit_flow() {
         }],
     };
     test_data.push_bitcoin_txs(
+        &mut rng,
         &bitcoin_chain_tip,
         vec![(TransactionType::SbtcTransaction, signers_utxo_tx.clone())],
     );

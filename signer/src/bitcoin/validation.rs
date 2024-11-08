@@ -139,7 +139,7 @@ impl BitcoinTxContext {
         };
 
         let utxo = db
-            .get_signer_utxo2(&self.chain_tip, self.context_window)
+            .get_signer_utxo(&self.chain_tip, self.context_window)
             .await?
             .ok_or(Error::MissingSignerUtxo)?;
 

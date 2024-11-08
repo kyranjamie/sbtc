@@ -160,6 +160,7 @@ where
             ..EMPTY_BITCOIN_TX
         };
         test_data.push_bitcoin_txs(
+            &mut rng,
             &bitcoin_chain_tip,
             vec![(model::TransactionType::SbtcTransaction, tx_1.clone())],
         );
@@ -315,6 +316,7 @@ where
             ..EMPTY_BITCOIN_TX
         };
         test_data.push_bitcoin_txs(
+            &mut rng,
             &bitcoin_chain_tip,
             vec![(model::TransactionType::SbtcTransaction, tx_1.clone())],
         );
@@ -526,6 +528,7 @@ where
         );
         test_data.push(block);
         test_data.push_bitcoin_txs(
+            &mut rng,
             &block_ref,
             vec![(model::TransactionType::SbtcTransaction, tx.clone())],
         );
@@ -549,7 +552,7 @@ where
         assert_eq!(chain_tip, block_ref.block_hash);
 
         let signer_utxo = storage
-            .get_signer_utxo(&chain_tip, &aggregate_key, self.context_window)
+            .get_signer_utxo(&chain_tip, self.context_window)
             .await
             .unwrap()
             .expect("no signer utxo");
@@ -575,9 +578,10 @@ where
         let original_test_data = test_data.clone();
 
         let test_data_rc = RefCell::new(test_data);
+        let mut rng2 = rng.clone();
         let mut push_block = |parent| {
             let (block, block_ref) = test_data_rc.borrow_mut().new_block(
-                &mut rng,
+                &mut rng2,
                 &signer_set.signer_keys(),
                 &self.test_model_parameters,
                 Some(parent),
@@ -585,7 +589,8 @@ where
             test_data_rc.borrow_mut().push(block);
             block_ref
         };
-        let push_utxo = |block_ref, sat_amt| {
+        let mut rng3 = rng.clone();
+        let mut push_utxo = |block_ref, sat_amt| {
             let tx = bitcoin::Transaction {
                 output: vec![bitcoin::TxOut {
                     value: bitcoin::Amount::from_sat(sat_amt),
@@ -594,6 +599,7 @@ where
                 ..EMPTY_BITCOIN_TX
             };
             test_data_rc.borrow_mut().push_bitcoin_txs(
+                &mut rng3,
                 block_ref,
                 vec![(model::TransactionType::SbtcTransaction, tx.clone())],
             );
@@ -648,7 +654,7 @@ where
                 public_key: bitcoin::XOnlyPublicKey::from(aggregate_key),
             };
             let signer_utxo = storage
-                .get_signer_utxo(&chain_tip.block_hash, &aggregate_key, self.context_window)
+                .get_signer_utxo(&chain_tip.block_hash, self.context_window)
                 .await
                 .unwrap()
                 .expect("no signer utxo");
@@ -656,13 +662,13 @@ where
         }
 
         // Check context window
-        assert!(storage
-            .get_signer_utxo(&block_c2.block_hash, &aggregate_key, 1)
+        assert!(dbg!(storage
+            .get_signer_utxo(&dbg!(block_c2.block_hash), 1)
             .await
-            .unwrap()
+            .unwrap())
             .is_none());
         assert!(storage
-            .get_signer_utxo(&block_c2.block_hash, &aggregate_key, 2)
+            .get_signer_utxo(&block_c2.block_hash, 2)
             .await
             .unwrap()
             .is_some());
@@ -730,6 +736,7 @@ where
         );
         test_data.push(block);
         test_data.push_bitcoin_txs(
+            &mut rng,
             &block_ref,
             vec![
                 (model::TransactionType::SbtcTransaction, tx_1.clone()),
@@ -757,7 +764,7 @@ where
         assert_eq!(chain_tip, block_ref.block_hash);
 
         let signer_utxo = storage
-            .get_signer_utxo(&chain_tip, &aggregate_key, self.context_window)
+            .get_signer_utxo(&chain_tip, self.context_window)
             .await
             .unwrap()
             .expect("no signer utxo");
@@ -801,6 +808,7 @@ where
         };
         test_data.push(block);
         test_data.push_bitcoin_txs(
+            &mut rng,
             &block_a1,
             vec![(model::TransactionType::SbtcTransaction, tx_a1.clone())],
         );
@@ -820,6 +828,7 @@ where
         };
         test_data.push(block);
         test_data.push_bitcoin_txs(
+            &mut rng,
             &block_a2,
             vec![(model::TransactionType::Donation, tx_a2.clone())],
         );
@@ -839,6 +848,7 @@ where
         };
         test_data.push(block);
         test_data.push_bitcoin_txs(
+            &mut rng,
             &block_b1,
             vec![(model::TransactionType::Donation, tx_b1.clone())],
         );
@@ -850,7 +860,7 @@ where
 
         // Check with chain tip A1
         let signer_utxo = storage
-            .get_signer_utxo(&block_a1.block_hash, &aggregate_key, self.context_window)
+            .get_signer_utxo(&block_a1.block_hash, self.context_window)
             .await
             .unwrap()
             .expect("no signer utxo");
@@ -865,7 +875,7 @@ where
 
         // Check with chain tip A2
         let signer_utxo = storage
-            .get_signer_utxo(&block_a2.block_hash, &aggregate_key, self.context_window)
+            .get_signer_utxo(&block_a2.block_hash, self.context_window)
             .await
             .unwrap()
             .expect("no signer utxo");
@@ -880,7 +890,7 @@ where
 
         // Check with chain tip B1
         let signer_utxo = storage
-            .get_signer_utxo(&block_b1.block_hash, &aggregate_key, self.context_window)
+            .get_signer_utxo(&block_b1.block_hash, self.context_window)
             .await
             .unwrap()
             .expect("no signer utxo");

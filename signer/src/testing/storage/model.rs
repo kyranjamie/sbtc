@@ -48,6 +48,12 @@ pub struct TestData {
 
     /// Withdraw signers
     pub withdraw_signers: Vec<model::WithdrawalSigner>,
+
+    /// signer outputs
+    pub signer_outputs: Vec<model::SignerOutput>,
+
+    /// sweep transactions
+    pub sweep_transactions: Vec<model::SweepTransaction>,
 }
 
 impl TestData {
@@ -123,6 +129,8 @@ impl TestData {
                 bitcoin_transactions: deposit_data.bitcoin_transactions,
                 stacks_transactions: withdraw_data.stacks_transactions,
                 transactions,
+                signer_outputs: Vec::new(),
+                sweep_transactions: Vec::new(),
             },
             block.into(),
         )
@@ -141,6 +149,8 @@ impl TestData {
         self.stacks_transactions
             .extend(new_data.stacks_transactions);
         self.transactions.extend(new_data.transactions);
+        self.signer_outputs.extend(new_data.signer_outputs);
+        self.sweep_transactions.extend(new_data.sweep_transactions);
     }
 
     /// Remove data in `other` present in the current model.
@@ -154,22 +164,28 @@ impl TestData {
         vec_diff(&mut self.bitcoin_transactions, &other.bitcoin_transactions);
         vec_diff(&mut self.stacks_transactions, &other.stacks_transactions);
         vec_diff(&mut self.transactions, &other.transactions);
+        vec_diff(&mut self.signer_outputs, &other.signer_outputs);
     }
 
     /// Push bitcoin txs to a specific bitcoin block
-    pub fn push_bitcoin_txs(
+    pub fn push_bitcoin_txs<R>(
         &mut self,
+        rng: &mut R,
         block: &BitcoinBlockRef,
         sbtc_txs: Vec<(model::TransactionType, bitcoin::Transaction)>,
-    ) {
+    ) where
+        R: rand::RngCore,
+    {
         let mut bitcoin_transactions = vec![];
         let mut transactions = vec![];
+        let mut signer_outputs = Vec::new();
+        let mut sweep_transactions = Vec::new();
 
         for (tx_type, tx) in sbtc_txs {
             let mut tx_bytes = Vec::new();
             tx.consensus_encode(&mut tx_bytes).unwrap();
 
-            let tx = model::Transaction {
+            let model_tx = model::Transaction {
                 txid: tx.compute_txid().to_byte_array(),
                 tx: tx_bytes,
                 tx_type,
@@ -177,17 +193,54 @@ impl TestData {
             };
 
             let bitcoin_transaction = model::BitcoinTxRef {
-                txid: tx.txid.into(),
+                txid: model_tx.txid.into(),
                 block_hash: block.block_hash,
             };
 
-            transactions.push(tx);
+            transactions.push(model_tx);
             bitcoin_transactions.push(bitcoin_transaction);
+
+            if tx_type == model::TransactionType::SbtcTransaction {
+                let mut sweep_transaction: model::SweepTransaction = fake::Faker.fake_with_rng(rng);
+                sweep_transaction.txid = tx.compute_txid().into();
+                sweep_transaction.signer_outputs = Vec::new();
+                sweep_transaction.swept_deposits = Vec::new();
+                sweep_transaction.swept_withdrawals = Vec::new();
+                if let Some(tx_in) = tx.input.first() {
+                    sweep_transaction.signer_prevout_txid = tx_in.previous_output.txid.into();
+                    sweep_transaction.signer_prevout_output_index = tx_in.previous_output.vout;
+                }
+                if let Some(tx_out) = tx.output.first() {
+                    sweep_transaction.signer_prevout_script_pubkey =
+                        tx_out.script_pubkey.clone().into();
+                }
+                sweep_transactions.push(sweep_transaction);
+            }
+
+            let txo_type = match tx_type {
+                model::TransactionType::SbtcTransaction => model::TxoType::Signers,
+                model::TransactionType::Donation => model::TxoType::Donation,
+                _ => continue,
+            };
+            if let Some(tx_out) = tx.output.first() {
+                // In our tests we always put the first output as the
+                // signers UTXO, even if it is a donation.
+                let signer_output = model::SignerOutput {
+                    txid: tx.compute_txid().into(),
+                    output_index: 0,
+                    script_pubkey: tx_out.script_pubkey.clone().into(),
+                    amount: tx_out.value.to_sat(),
+                    txo_type,
+                };
+                signer_outputs.push(signer_output);
+            }
         }
 
         self.push(Self {
             bitcoin_transactions,
             transactions,
+            signer_outputs,
+            sweep_transactions,
             ..Self::default()
         });
     }
@@ -258,6 +311,14 @@ impl TestData {
                 .write_withdrawal_signer_decision(decision)
                 .await
                 .expect("failed to write signer decision");
+        }
+
+        for signer_output in self.signer_outputs.iter() {
+            storage.write_signer_txo(signer_output).await.unwrap();
+        }
+
+        for sweep_tx in self.sweep_transactions.iter() {
+            storage.write_sweep_transaction(sweep_tx).await.unwrap();
         }
     }
 

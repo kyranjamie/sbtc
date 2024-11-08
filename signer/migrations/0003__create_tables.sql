@@ -209,6 +209,7 @@ CREATE TYPE sbtc_signer.txo_type AS ENUM (
     'donation'
 );
 
+-- A table for all transaction outputs that the signers can spend.
 CREATE TABLE sbtc_signer.signer_txos (
     txid BYTEA NOT NULL,
     -- The index of the donation output in the transaction.
@@ -220,8 +221,8 @@ CREATE TABLE sbtc_signer.signer_txos (
     -- The type of UTXO this is
     txo_type sbtc_signer.txo_type NOT NULL,
     -- a timestamp of when this record was created in the database.
-    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
-    PRIMARY KEY (txid, output_index),
+    created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL,
+    PRIMARY KEY (txid, output_index)
 );
 
 -- Represents a single withdrawal request which has been included in a sweep
