@@ -617,6 +617,14 @@ impl super::DbRead for SharedStore {
         get_utxo(aggregate_key, sbtc_txs)
     }
 
+    async fn get_signer_utxo2(
+        &self,
+        _chain_tip: &model::BitcoinBlockHash,
+        _context_window: u16,
+    ) -> Result<Option<SignerUtxo>, Error> {
+        unimplemented!()
+    }
+
     async fn get_deposit_request_signer_votes(
         &self,
         txid: &model::BitcoinTxId,

@@ -5,6 +5,7 @@ use std::sync::OnceLock;
 
 use bitcoin::consensus::Decodable as _;
 use bitcoin::hashes::Hash as _;
+use bitcoin::OutPoint;
 use blockstack_lib::chainstate::nakamoto::NakamotoBlock;
 use blockstack_lib::chainstate::stacks::TransactionPayload;
 use blockstack_lib::codec::StacksMessageCodec;
@@ -1470,6 +1471,64 @@ impl super::DbRead for PgStore {
         .fetch_all(&self.0)
         .await
         .map_err(Error::SqlxQuery)
+    }
+
+    async fn get_signer_utxo2(
+        &self,
+        chain_tip: &model::BitcoinBlockHash,
+        context_window: u16,
+    ) -> Result<Option<SignerUtxo>, Error> {
+        #[derive(sqlx::FromRow)]
+        struct PgSignerUtxo {
+            txid: model::BitcoinTxId,
+            #[sqlx(try_from = "i32")]
+            output_index: u32,
+            #[sqlx(try_from = "i64")]
+            amount: u64,
+            public_key: PublicKey,
+        }
+
+        let pg_utxo = sqlx::query_as::<_, PgSignerUtxo>(
+            r#"
+            WITH bitcoin_blockchain AS (
+                SELECT block_hash
+                FROM bitcoin_blockchain_of($1, $2)
+            ),
+            confirmed_sweeps AS (
+                SELECT 
+                    signer_prevout_txid
+                  , signer_prevout_output_index
+                FROM sbtc_signer.sweep_transactions AS st
+                JOIN sbtc_signer.bitcoin_transactions AS bt USING (txid)
+                JOIN bitcoin_blockchain AS bb USING (block_hash)
+            )
+            SELECT
+                sso.txid
+              , sso.output_index
+              , sso.amount
+              , sso.aggregate_key
+            FROM sbtc_signer.sweep_signer_outputs AS sso
+            JOIN sbtc_signer.bitcoin_transactions AS bt USING (txid)
+            JOIN bitcoin_blockchain AS bb USING (block_hash)
+            JOIN sbtc_signer.dkg_shares AS ds USING (script_pubkey)
+            LEFT JOIN confirmed_sweeps AS cs
+              ON cs.signer_prevout_txid = sso.txid
+              AND cs.signer_prevout_output_index = sso.output_index
+            WHERE cs.signer_prevout_txid IS NULL
+              AND sso.output_index = 0;
+            "#,
+        )
+        .bind(chain_tip)
+        .bind(context_window as i32)
+        .fetch_optional(&self.0)
+        .await
+        .map_err(Error::SqlxQuery)?;
+
+        Ok(pg_utxo.map(|pg_txo| SignerUtxo {
+            outpoint: OutPoint::new(pg_txo.txid.into(), pg_txo.output_index),
+            amount: pg_txo.amount,
+            public_key: pg_txo.public_key.into(),
+        }))
     }
 
     async fn get_signer_utxo(
