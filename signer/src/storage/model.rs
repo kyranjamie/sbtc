@@ -47,7 +47,9 @@ pub struct SweepTransaction {
     pub created_at_block_hash: BitcoinBlockHash,
     /// The market fee rate at the time of this transaction.
     pub market_fee_rate: f64,
-
+    /// The outputs created for the signers.
+    #[sqlx(skip)]
+    pub sweep_signer_outputs: Vec<SweepSignerOutput>,
     /// List of deposits which were swept-in by this transaction.
     #[sqlx(skip)]
     pub swept_deposits: Vec<SweptDeposit>,
@@ -78,6 +80,7 @@ impl From<&crate::message::SweepTransactionInfo> for SweepTransaction {
             fee: info.fee,
             market_fee_rate: info.market_fee_rate,
             created_at_block_hash: info.created_at_block_hash.into(),
+            sweep_signer_outputs: info.sweep_signer_outputs.iter().map(Into::into).collect(),
             swept_deposits: info.swept_deposits.iter().map(Into::into).collect(),
             swept_withdrawals: info.swept_withdrawals.iter().map(Into::into).collect(),
         }
@@ -117,6 +120,30 @@ impl From<&crate::message::SweptDeposit> for SweptDeposit {
             input_index: deposit.input_index,
             deposit_request_txid: deposit.deposit_request_txid.into(),
             deposit_request_output_index: deposit.deposit_request_output_index,
+        }
+    }
+}
+
+/// A signer output in an sBTC sweep transaction.
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, sqlx::FromRow)]
+#[cfg_attr(feature = "testing", derive(fake::Dummy))]
+pub struct SweepSignerOutput {
+    /// The index of the output in the sBTC sweep transaction.
+    #[sqlx(try_from = "i32")]
+    #[cfg_attr(feature = "testing", dummy(faker = "0..i32::MAX as u32"))]
+    pub output_index: u32,
+    /// The scriptPubKey locking the output.
+    pub script_pubkey: ScriptPubKey,
+    /// The amount created in the output.
+    pub amount: u64,
+}
+
+impl From<&crate::message::SweepSignerOutput> for SweepSignerOutput {
+    fn from(value: &crate::message::SweepSignerOutput) -> Self {
+        Self {
+            output_index: value.output_index,
+            script_pubkey: value.script_pubkey.clone().into(),
+            amount: value.amount,
         }
     }
 }

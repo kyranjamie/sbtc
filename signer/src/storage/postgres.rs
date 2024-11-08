@@ -2453,6 +2453,28 @@ impl super::DbWrite for PgStore {
             .map_err(Error::SqlxQuery)?;
         }
 
+        for signer_output in transaction.sweep_signer_outputs.iter() {
+            sqlx::query(
+                "
+                INSERT INTO sweep_signer_outputs (
+                    txid
+                  , output_index
+                  , amount
+                  , script_pubkey
+                )
+                VALUES ($1, $2, $3, $4)
+                ON CONFLICT DO NOTHING;
+            ",
+            )
+            .bind(transaction.txid)
+            .bind(i32::try_from(signer_output.output_index).map_err(Error::ConversionDatabaseInt)?)
+            .bind(i64::try_from(signer_output.amount).map_err(Error::ConversionDatabaseInt)?)
+            .bind(&signer_output.script_pubkey)
+            .execute(&mut *tx)
+            .await
+            .map_err(Error::SqlxQuery)?;
+        }
+
         // Insert the serviced withdrawals.
         for withdrawal in transaction.swept_withdrawals.iter() {
             sqlx::query(

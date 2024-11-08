@@ -204,6 +204,19 @@ CREATE TABLE sbtc_signer.sweep_transactions (
     created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP NOT NULL
 );
 
+CREATE TABLE sbtc_signer.sweep_signer_outputs (
+    txid BYTEA NOT NULL,
+    -- The index of the sweep output in the sweep transaction.
+    output_index INTEGER NOT NULL,
+    -- The amount of the output,
+    amount BIGINT NOT NULL,
+    -- The scriptPubKey of the output
+    script_pubkey BYTEA NOT NULL,
+
+    PRIMARY KEY (txid, output_index),
+    FOREIGN KEY (txid) REFERENCES sbtc_signer.sweep_transactions(txid)
+);
+
 -- Represents a single withdrawal request which has been included in a sweep
 -- transaction package. Withdrawal requests have a unique ID so we use that here
 -- to reference the withdrawal request together with its Stacks block hash,
