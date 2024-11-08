@@ -51,9 +51,6 @@ pub struct TestData {
 
     /// signer outputs
     pub signer_outputs: Vec<model::SignerOutput>,
-
-    /// sweep transactions
-    pub sweep_transactions: Vec<model::SweepTransaction>,
 }
 
 impl TestData {
@@ -130,7 +127,6 @@ impl TestData {
                 stacks_transactions: withdraw_data.stacks_transactions,
                 transactions,
                 signer_outputs: Vec::new(),
-                sweep_transactions: Vec::new(),
             },
             block.into(),
         )
@@ -150,7 +146,6 @@ impl TestData {
             .extend(new_data.stacks_transactions);
         self.transactions.extend(new_data.transactions);
         self.signer_outputs.extend(new_data.signer_outputs);
-        self.sweep_transactions.extend(new_data.sweep_transactions);
     }
 
     /// Remove data in `other` present in the current model.
@@ -168,18 +163,14 @@ impl TestData {
     }
 
     /// Push bitcoin txs to a specific bitcoin block
-    pub fn push_bitcoin_txs<R>(
+    pub fn push_bitcoin_txs(
         &mut self,
-        rng: &mut R,
         block: &BitcoinBlockRef,
         sbtc_txs: Vec<(model::TransactionType, bitcoin::Transaction)>,
-    ) where
-        R: rand::RngCore,
-    {
+    ) {
         let mut bitcoin_transactions = vec![];
         let mut transactions = vec![];
         let mut signer_outputs = Vec::new();
-        let mut sweep_transactions = Vec::new();
 
         for (tx_type, tx) in sbtc_txs {
             let mut tx_bytes = Vec::new();
@@ -199,23 +190,6 @@ impl TestData {
 
             transactions.push(model_tx);
             bitcoin_transactions.push(bitcoin_transaction);
-
-            if tx_type == model::TransactionType::SbtcTransaction {
-                let mut sweep_transaction: model::SweepTransaction = fake::Faker.fake_with_rng(rng);
-                sweep_transaction.txid = tx.compute_txid().into();
-                sweep_transaction.signer_outputs = Vec::new();
-                sweep_transaction.swept_deposits = Vec::new();
-                sweep_transaction.swept_withdrawals = Vec::new();
-                if let Some(tx_in) = tx.input.first() {
-                    sweep_transaction.signer_prevout_txid = tx_in.previous_output.txid.into();
-                    sweep_transaction.signer_prevout_output_index = tx_in.previous_output.vout;
-                }
-                if let Some(tx_out) = tx.output.first() {
-                    sweep_transaction.signer_prevout_script_pubkey =
-                        tx_out.script_pubkey.clone().into();
-                }
-                sweep_transactions.push(sweep_transaction);
-            }
 
             let txo_type = match tx_type {
                 model::TransactionType::SbtcTransaction => model::TxoType::Signers,
@@ -240,7 +214,6 @@ impl TestData {
             bitcoin_transactions,
             transactions,
             signer_outputs,
-            sweep_transactions,
             ..Self::default()
         });
     }
@@ -315,10 +288,6 @@ impl TestData {
 
         for signer_output in self.signer_outputs.iter() {
             storage.write_signer_txo(signer_output).await.unwrap();
-        }
-
-        for sweep_tx in self.sweep_transactions.iter() {
-            storage.write_sweep_transaction(sweep_tx).await.unwrap();
         }
     }
 
