@@ -142,7 +142,7 @@ impl From<&crate::message::SweepSignerOutput> for SweepSignerOutput {
     fn from(value: &crate::message::SweepSignerOutput) -> Self {
         Self {
             output_index: value.output_index,
-            script_pubkey: value.script_pubkey.clone().into(),
+            script_pubkey: value.script_pubkey.clone(),
             amount: value.amount,
         }
     }
