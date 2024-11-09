@@ -1089,7 +1089,7 @@ impl super::DbWrite for SharedStore {
     }
 
     async fn write_signer_txo(&self, _signer_output: &model::SignerOutput) -> Result<(), Error> {
-        unimplemented!()
+        Ok(())
     }
 
     async fn write_sweep_transaction(&self, tx: &model::SweepTransaction) -> Result<(), Error> {
