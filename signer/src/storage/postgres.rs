@@ -644,8 +644,27 @@ impl PgStore {
         .await
         .map_err(Error::SqlxQuery)?;
 
+        let signer_outputs = sqlx::query_as(
+            r#"
+            SELECT
+                txid
+              , output_index
+              , amount
+              , script_pubkey
+              , txo_type
+            FROM signer_txos
+            WHERE txid = $1
+            ORDER BY output_index ASC;
+        "#,
+        )
+        .bind(sweep_txid)
+        .fetch_all(&self.0)
+        .await
+        .map_err(Error::SqlxQuery)?;
+
         transaction.swept_deposits = swept_deposits;
         transaction.swept_withdrawals = swept_withdrawals;
+        transaction.signer_outputs = signer_outputs;
 
         Ok(Some(transaction))
     }
