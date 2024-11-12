@@ -183,7 +183,8 @@ impl std::ops::DerefMut for SignerStateMachine {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CoordinatorStateMachine(WstsCoordinator);
 
-type WstsCoordinator = wsts::state_machine::coordinator::frost::Coordinator<wsts::v2::Aggregator>;
+//type WstsCoordinator = wsts::state_machine::coordinator::frost::Coordinator<wsts::v2::Aggregator>;
+type WstsCoordinator = wsts::state_machine::coordinator::fire::Coordinator<wsts::v2::Aggregator>;
 
 impl CoordinatorStateMachine {
     /// Create a new state machine
@@ -204,7 +205,7 @@ impl CoordinatorStateMachine {
             .try_into()
             .expect("The number of signers is greater than u32::MAX?");
         let signer_key_ids = (0..num_signers)
-            .map(|signer_id| (signer_id, std::iter::once(signer_id).collect()))
+            .map(|signer_id| (signer_id, std::iter::once(signer_id + 1).collect()))
             .collect();
         let config = wsts::state_machine::coordinator::Config {
             num_signers,

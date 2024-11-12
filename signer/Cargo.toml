@@ -51,7 +51,7 @@ tracing-attributes.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
 # wsts.workspace = true
-wsts = { git = "https://github.com/Trust-Machines/wsts.git", rev = "708ecedee0b6705ecb5c1d69ffa2661b94c19ebd" }
+wsts = { git = "https://github.com/Trust-Machines/wsts.git", rev = "e214f39d13b36f22a28e2455461b6eb92997521e" }
 zeromq.workspace = true
 hex.workspace = true
 cfg-if = "1.0"

@@ -14,7 +14,7 @@ use crate::wsts_state_machine;
 
 use fake::Fake;
 use wsts::state_machine::coordinator;
-use wsts::state_machine::coordinator::frost;
+use wsts::state_machine::coordinator::fire;
 
 use crate::ecdsa::SignEcdsa as _;
 use crate::network::MessageTransfer as _;
@@ -79,7 +79,7 @@ pub fn generate_signer_info<Rng: rand::RngCore + rand::CryptoRng>(
 /// Test coordinator that can operate over an `in_memory` network
 pub struct Coordinator {
     network: network::in_memory::MpmcBroadcaster,
-    wsts_coordinator: frost::Coordinator<wsts::v2::Aggregator>,
+    wsts_coordinator: fire::Coordinator<wsts::v2::Aggregator>,
     private_key: PrivateKey,
     num_signers: u32,
 }
@@ -102,7 +102,7 @@ impl Coordinator {
         let num_keys = num_signers;
         let dkg_threshold = num_keys;
         let signer_key_ids = (0..num_signers)
-            .map(|signer_id| (signer_id, std::iter::once(signer_id).collect()))
+            .map(|signer_id| (signer_id, std::iter::once(signer_id + 1).collect()))
             .collect();
         let config = wsts::state_machine::coordinator::Config {
             num_signers,
@@ -119,7 +119,9 @@ impl Coordinator {
             signer_public_keys,
         };
 
-        let wsts_coordinator = frost::Coordinator::new(config);
+        tracing::info!("signer_key_ids {:?}", &config.signer_key_ids);
+
+        let wsts_coordinator = fire::Coordinator::new(config);
 
         Self {
             network,
